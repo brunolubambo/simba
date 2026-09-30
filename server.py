@@ -17,6 +17,7 @@ from .hub import Hub, save_sub, send_push, vapid
 from .observer import Observer
 from . import tasks, life, google, memory
 from .agents import roster
+from .telegram import get_telegram, send_telegram_notification
 
 TOKEN = os.getenv("SIMBA_TOKEN", "")
 AUTO_ACT = os.getenv("SIMBA_AUTO", "true").lower() == "true"     # executa sugestões sem pedir clique
@@ -30,7 +31,7 @@ def check(token: str):
         raise HTTPException(401, "token inválido")
 
 
-async def run_and_broadcast(text: str, origin: str):
+async def run_and_broadcast(text: str, origin: str, chat_id: int | None = None):
     await hub.broadcast({"type": "user", "text": text, "device": origin})
     last = ""
     try:
@@ -45,8 +46,14 @@ async def run_and_broadcast(text: str, origin: str):
                 STATS["cost"] += ev.get("cost_usd") or 0
         if origin == "rotina" and last:      # rotinas chegam no celular mesmo com o app fechado
             await asyncio.to_thread(send_push, {"titulo": "SIMBA", "motivo": last})
+        if origin == "telegram" and last and chat_id:  # envia resposta no Telegram
+            tm = get_telegram()
+            await tm.send_message(chat_id, last)
     except Exception as e:
         await hub.broadcast({"type": "error", "text": str(e)})
+        if origin == "telegram" and chat_id:
+            tm = get_telegram()
+            await tm.send_message(chat_id, f"❌ Erro: {str(e)[:100]}")
 
 
 def status() -> dict:
@@ -64,12 +71,23 @@ async def lifespan(app):
             asyncio.create_task(run_and_broadcast(s["acao"], "proativo"))
         hub.on_suggest = act
     state["observer"] = Observer(hub)
+
+    # Inicializa Telegram
+    tm = get_telegram()
+    try:
+        await tm.initialize()
+        tm.on_message = lambda msg: run_and_broadcast(msg["text"], msg["origin"], msg.get("chat_id"))
+    except Exception as e:
+        print(f"⚠️  Erro na inicialização do Telegram: {e}. Servidor continuará sem Telegram.")
+
     bg = [asyncio.create_task(c) for c in (
         state["observer"].run(), tasks.reminders_loop(hub), tasks.routines_loop(run_and_broadcast),
-        tasks.mail_loop(hub), tasks.calendar_loop(hub))]
+        tasks.mail_loop(hub), tasks.calendar_loop(hub), tm.start())]
+
     yield
     for t in bg:
         t.cancel()
+    await tm.stop()
     await state["simba"].stop()
 
 
@@ -140,7 +158,9 @@ def painel(token: str = Query("")):
     import sqlite3
     with life.db() as c:
         pend = c.execute("SELECT COUNT(*) FROM lembretes WHERE feito=0").fetchone()[0]
+    tm = get_telegram()
     return {"agents": roster(), "auto": AUTO_ACT, "lembretes": pend, "memoria": memory.stats(),
+            "telegram": {"users": tm.user_count(), "token_set": bool(tm.bot)},
             "stats": {"uptime_s": int(time.time() - STATS["start"]), "tarefas_hoje": STATS["tasks"],
                       "custo_hoje": round(STATS["cost"], 4)}}
 
@@ -183,6 +203,38 @@ def push_subscribe(sub: dict = Body(...), token: str = Query("")):
     check(token)
     save_sub(sub)
     return {"ok": True}
+
+
+@app.post("/telegram/notify")
+async def telegram_notify(message: dict = Body(...), token: str = Query("")):
+    """Envia notificação para todos os usuários Telegram."""
+    check(token)
+    text = message.get("text", "")
+    if not text:
+        raise HTTPException(400, "texto vazio")
+    await send_telegram_notification(text)
+    return {"ok": True}
+
+
+@app.get("/telegram/users")
+def telegram_users(token: str = Query("")):
+    """Lista usuários Telegram registrados."""
+    check(token)
+    tm = get_telegram()
+    return {"count": tm.user_count(), "users": tm.user_mapping}
+
+
+@app.post("/telegram/send")
+async def telegram_send(payload: dict = Body(...), token: str = Query("")):
+    """Envia mensagem para um chat específico do Telegram."""
+    check(token)
+    chat_id = payload.get("chat_id")
+    text = payload.get("text", "")
+    if not chat_id or not text:
+        raise HTTPException(400, "chat_id ou text ausente")
+    tm = get_telegram()
+    success = await tm.send_message(int(chat_id), text)
+    return {"ok": success}
 
 
 app.mount("/", StaticFiles(directory=ROOT / "pwa", html=True), name="pwa")
