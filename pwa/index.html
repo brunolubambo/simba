@@ -34,7 +34,8 @@ body::after{content:"";position:fixed;inset:0;pointer-events:none;
 
 #caption{padding:4px 18px 2px;text-align:center}
 #heard{color:var(--muted);font-size:15px;min-height:20px}
-#said{display:none}
+#said{max-height:min(28vh,11rem);overflow:auto;white-space:pre-wrap;font-size:16px;padding:2px 6px 6px}
+#said:empty{display:none}
 
 #alerts{position:fixed;top:max(10px,env(safe-area-inset-top));left:12px;width:min(300px,calc(100vw - 24px));z-index:4;display:flex;flex-direction:column;gap:6px}
 .alert{border:1px solid var(--amber);background:rgba(40,26,4,.75);padding:8px 10px;color:#ffe2b0;font-size:15px;
@@ -520,10 +521,6 @@ async function loadPanel() {
   } catch {}
 }
 
-// #region agent log
-let dbgT0 = 0;
-function dbg(location, message, data, hypothesisId) { fetch('http://127.0.0.1:7758/ingest/8154ab9e-1423-43c1-8d13-6e63b8bef731',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'f7a251'},body:JSON.stringify({sessionId:'f7a251',runId:'run1',hypothesisId,location,message,data:{...data,sinceSpeechMs:dbgT0?Math.round(performance.now()-dbgT0):null},timestamp:Date.now()})}).catch(()=>{}); }
-// #endregion
 // ---------- fala ----------
 let speaking = false, voice = null, convoUntil = 0;
 // voz neural do servidor (Antonio); se falhar, usa a voz do próprio celular
@@ -572,31 +569,19 @@ async function say(text) {
   ensureVoiceTap();
   try { audioCtx && audioCtx.resume(); } catch {}
   player.pause(); freeUrl(); stopListening(); speaking = true; setState("speaking", "falando"); animateBars(true);
-  // #region agent log
-  const dbgSay = performance.now(); dbg("index.html:say", "say start", { chars: t.length, serverVoice: !!TOKEN && Date.now() > serverVoiceOffUntil }, "B,E");
-  // #endregion
   if (TOKEN && Date.now() > serverVoiceOffUntil) {
     try {
       const r = await fetch(`/tts?token=${T()}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: t }) });
       if (!r.ok) throw new Error("tts " + r.status);
       const { id: job } = await r.json();
-      // #region agent log
-      dbg("index.html:say", "tts job ready", { ttsMs: Math.round(performance.now() - dbgSay), stale: id !== sayId, runId: "post-fix" }, "B");
-      // #endregion
       if (id !== sayId) return;                       // chegou outra fala no meio: descarta esta
       playingUrl = `/tts/${job}?token=${T()}`;          // o navegador toca enquanto o áudio ainda chega
       player.onended = () => { if (id === sayId) { playingUrl = null; doneSpeaking(); } };
       player.onerror = () => { if (id === sayId) { playingUrl = null; sayBrowser(t); } };
       player.src = playingUrl;
       await player.play();
-      // #region agent log
-      dbg("index.html:say", "audio playing", { sincesayMs: Math.round(performance.now() - dbgSay) }, "C");
-      // #endregion
       return;
     } catch (e) {
-      // #region agent log
-      dbg("index.html:say", "server voice failed", { err: String(e && (e.name + ": " + e.message)).slice(0, 120), afterMs: Math.round(performance.now() - dbgSay) }, "E");
-      // #endregion
       if (id !== sayId) return;
       player.onended = player.onerror = null;              // não deixa o player disparar a fala de reserva de novo
       if (!(e && e.name === "NotAllowedError")) serverVoiceOffUntil = Date.now() + 5 * 60 * 1000;  // servidor falhou: 5 min na voz do celular
@@ -639,9 +624,6 @@ if (SR) {
     let interim = "", final = "";
     for (let i = e.resultIndex; i < e.results.length; i++) (e.results[i].isFinal ? (final += e.results[i][0].transcript) : (interim += e.results[i][0].transcript));
     if (interim) $("#heard").textContent = "› " + interim;     // mostra o que o microfone está ouvindo
-    // #region agent log
-    if (final) { dbgT0 = performance.now(); dbg("index.html:onresult", "final utterance", { chars: final.length }, "D"); }
-    // #endregion
     if (final) handleUtterance(final.trim());
   };
   rec.onerror = e => { if (e.error === "not-allowed" || e.error === "service-not-allowed") { wantListen = false; showWake(); } };
@@ -697,9 +679,6 @@ function showSaid(t) { const s = $("#said"); s.textContent = t; s.classList.togg
 const online = () => ws && ws.readyState === 1;
 function send(o) { if (online()) ws.send(JSON.stringify(o)); else if (o.type === "message") outbox.push(o); }
 function sendMessage(text) {
-  // #region agent log
-  if (!dbgT0) dbgT0 = performance.now(); dbg("index.html:sendMessage", "message sent", { online: online(), chars: text.length }, "D");
-  // #endregion
   $("#heard").textContent = "› " + text; send({ type: "message", text });
   setState("thinking", online() ? "processando" : "sem conexão · envio ao reconectar");
 }
@@ -724,9 +703,6 @@ function connect() {
   };
   ws.onmessage = e => {
     const ev = JSON.parse(e.data);
-    // #region agent log
-    if (["user", "tool", "text", "done", "error"].includes(ev.type)) dbg("index.html:ws", "ws " + ev.type, { name: ev.name, chars: (ev.text || "").length }, "A");
-    // #endregion
     switch (ev.type) {
       case "status": { const miss = Object.entries(ev.google || {}).filter(([, v]) => !v.ok).map(([c]) => c); setupNotice(miss); break; }
       case "user": turnText = []; if (ev.device !== DEVICE) $("#heard").textContent = `› (${ev.device}) ${ev.text.slice(0, 120)}`;

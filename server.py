@@ -210,11 +210,6 @@ async def tts_stream(job: str, token: str = Query("")):
     text = TTS_JOBS.pop(job, None)
     if not text:
         raise HTTPException(404, "fala expirada")
-    # region agent log
-    import time as _t, json as _j; _t0 = _t.perf_counter()
-    def _dbg(m, **d):
-        open(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cursor", "debug-f7a251.log"), "a", encoding="utf-8").write(_j.dumps({"sessionId": "f7a251", "runId": "post-fix", "hypothesisId": "B", "location": "server.py:tts_stream", "message": m, "data": {**d, "chars": len(text), "ms": round((_t.perf_counter() - _t0) * 1000)}, "timestamp": int(_t.time() * 1000)}) + "\n")
-    # endregion
 
     async def audio():
         import edge_tts
@@ -222,18 +217,12 @@ async def tts_stream(job: str, token: str = Query("")):
             async for chunk in edge_tts.Communicate(piece, VOICE, rate=VOICE_RATE, pitch=VOICE_PITCH).stream():
                 if chunk["type"] == "audio":
                     yield chunk["data"]
-        # region agent log
-        _dbg("tts stream finished")
-        # endregion
 
     chunks = audio()
     try:
         first = await chunks.__anext__()
     except Exception as e:
         raise HTTPException(503, f"voz indisponível: {e}"[:200])
-    # region agent log
-    _dbg("tts first chunk sent")
-    # endregion
 
     async def body():
         yield first
