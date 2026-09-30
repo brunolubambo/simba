@@ -1,0 +1,8 @@
+# Dados locais do SIMBA (conversas, memória, tokens do Google): nunca vão para o GitHub
+data/
+workspace/
+.env
+# Python
+__pycache__/
+*.pyc
+.venv/

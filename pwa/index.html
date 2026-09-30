@@ -101,7 +101,7 @@ footer{display:flex;gap:8px;padding:8px 12px;padding-bottom:max(8px,env(safe-are
 
 <footer>
   <label class="sr" for="input">Digite quando não puder falar</label>
-  <input id="input" autocomplete="off" enterkeyhint="send" placeholder="Diga “Simba, …” ou digite aqui">
+  <input id="input" autocomplete="off" enterkeyhint="send" placeholder="Diga “ei, Simba” ou digite aqui">
 </footer>
 
 <div id="wake" role="dialog" aria-modal="true" aria-labelledby="wakeTitle"><div id="wakeBody"></div></div>
@@ -356,23 +356,33 @@ async function say(text) {
   sayBrowser(t);
 }
 
-// ---------- escuta contínua: "Simba, ..." ----------
+// ---------- escuta contínua enquanto a página está aberta: "ei, Simba" ----------
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-let rec = null, wantListen = true, pendingApproval = null;
+let rec = null, wantListen = true, pendingApproval = null, wakeTimer = 0;
 const YES = /^(sim|pode|autorizo|confirmo|confirma|manda|envia|ok|claro|isso|positivo|faca|faz|segue)\b/;
 const NO = /^(nao|cancela|negado|nega|para|pare|espera|negativo)\b/;
-// o reconhecimento em pt-BR costuma escrever "Simba" como "samba", "sinba", "zimba"...
-const WAKE = /\b(simba|samba|sinba|zimba|cimba|simbah|sim,? ba)\b[\s,.!?:-]*/;
-function afterWake(t) {  // comando depois da palavra de ativação, ou null se ela não foi dita
-  const src = t.normalize("NFC"), n = src.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-  const m = WAKE.exec(n); return m ? src.slice(m.index + m[0].length).trim() : null;
+// pt-BR escreve "Simba" como samba, sinba, zimba. "ei"/"hey" e a vírgula são opcionais.
+// "sim" sozinho não entra aqui: continua só na autorização.
+const WAKE = /\b(?:(?:ei|hey)[, ]+)?(?:simba|samba|sinba|zimba|cimba|simbah|sim[, ]+ba)\b[\s,.!?:-]*/;
+function afterWake(t) {  // frase inteira depois da ativação, ou null se ela não foi dita
+  const src = String(t).normalize("NFC");
+  const n = src.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  const m = WAKE.exec(n);
+  if (!m) return null;
+  const cut = m.index + m[0].length;
+  let seen = 0, i = 0;
+  while (i < src.length && seen < cut) {
+    seen += src[i].normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().length || 1;
+    i++;
+  }
+  return src.slice(i).trim();
 }
 function startListening() { if (!SR || speaking || !wantListen) return; try { rec.start(); } catch {} }
 function stopListening() { if (rec) try { rec.abort(); } catch {} }
 if (SR) {
   rec = new SR(); rec.lang = "pt-BR"; rec.continuous = true; rec.interimResults = true;
   rec.onstart = () => { $("#mVoice").textContent = "ouvindo";
-    if (!speaking && !document.body.classList.contains("thinking")) setState("listening", Date.now() < convoUntil ? "pode falar" : "diga “Simba”"); };
+    if (!speaking && !document.body.classList.contains("thinking")) setState("listening", Date.now() < convoUntil ? "pode falar" : "diga “ei, Simba”"); };
   rec.onresult = e => {
     let interim = "", final = "";
     for (let i = e.resultIndex; i < e.results.length; i++) (e.results[i].isFinal ? (final += e.results[i][0].transcript) : (interim += e.results[i][0].transcript));
@@ -383,6 +393,11 @@ if (SR) {
   rec.onend = () => { $("#mVoice").textContent = speaking ? "falando" : "pausa"; if (!speaking && wantListen) setTimeout(startListening, 250); };
 } else { $("#mVoice").textContent = "texto"; }
 
+function dispatch(cmd) {
+  if (!cmd) return;
+  if (/^(obrigad|valeu|era isso|so isso|pode parar|dispensado)/.test(norm(cmd))) { convoUntil = 0; return say("Às ordens."); }
+  sendMessage(cmd);
+}
 function handleUtterance(t) {
   const n = norm(t), rest = afterWake(t), woke = rest !== null;
   if (pendingApproval) {
@@ -390,11 +405,16 @@ function handleUtterance(t) {
     if (YES.test(tail)) return answerApproval(true);
     if (NO.test(tail)) return answerApproval(false);
   }
-  if (!woke && Date.now() > convoUntil) return;
-  const cmd = woke ? rest : t;
-  if (!cmd) { $("#heard").textContent = "› Simba"; return say("Pois não, senhor?"); }
-  if (/^(obrigad|valeu|era isso|so isso|pode parar|dispensado)/.test(norm(cmd))) { convoUntil = 0; return say("Às ordens."); }
-  sendMessage(cmd);
+  if (woke) {
+    clearTimeout(wakeTimer); wakeTimer = 0;
+    if (rest) return dispatch(rest);                 // o que veio depois de "ei, Simba" vai inteiro para a IA
+    $("#heard").textContent = "› ei, Simba";
+    wakeTimer = setTimeout(() => { wakeTimer = 0; if (!speaking) say("Pois não, senhor?"); }, 1600);
+    return;
+  }
+  if (wakeTimer) { clearTimeout(wakeTimer); wakeTimer = 0; return dispatch(t.trim()); }
+  if (Date.now() > convoUntil) return;
+  dispatch(t.trim());
 }
 
 // ---------- autorizações e avisos ----------

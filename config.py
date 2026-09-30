@@ -3,7 +3,10 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-ROOT = Path(__file__).resolve().parent.parent
+_PKG = Path(__file__).resolve().parent
+_PARENT = _PKG.parent
+# Na nuvem o Dockerfile sobe a pasta pwa para o diretório pai. No PC ela fica dentro do pacote.
+ROOT = _PARENT if (_PARENT / "pwa").is_dir() else _PKG
 DATA = Path(os.getenv("SIMBA_DATA", ROOT / "data"))              # memória, banco, tokens (volume na nuvem)
 WORKSPACE = Path(os.getenv("SIMBA_WORKSPACE", ROOT / "workspace"))  # onde o Simba cria arquivos
 MEMORY = Path(os.getenv("SIMBA_MEMORY_DIR", DATA / "memory"))   # cofre do Obsidian
