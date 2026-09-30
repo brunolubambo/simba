@@ -56,7 +56,8 @@ body.alert #core .r,body.alert #core .heart{stroke:var(--amber)}
 
 #caption{min-height:52px;padding:6px 18px 4px;text-align:center}
 #heard{color:var(--muted);font-size:15px;min-height:20px}
-#said{font-size:18px;font-weight:500;text-shadow:0 0 8px rgba(94,231,255,.35);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+#said{font-size:18px;font-weight:500;text-shadow:0 0 8px rgba(94,231,255,.35);white-space:pre-line;max-height:42vh;overflow-y:auto;overscroll-behavior:contain}
+#said.long{font-size:16px;text-align:left}
 
 #alerts{padding:0 12px;display:flex;flex-direction:column;gap:6px}
 .alert{border:1px solid var(--amber);background:rgba(40,26,4,.75);padding:8px 10px;color:#ffe2b0;font-size:15px;
@@ -199,6 +200,14 @@ setInterval(() => { if (!upAt) return; const s = upBase + (Date.now() - upAt) / 
 
 // ---------- fala ----------
 let speaking = false, voice = null, convoUntil = 0;
+// voz neural do servidor (Antonio); se falhar, usa a voz do próprio celular
+const player = new Audio(); let sayId = 0, playingUrl = null, serverVoiceOffUntil = 0;
+function unlockAudio() {  // iOS só toca áudio depois de um toque: toca um silêncio para liberar o player
+  if (playingUrl && !player.paused) return;            // já está falando com a voz do servidor: não interrompe
+  try { player.onended = player.onerror = null;
+        player.src = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA="; player.play().catch(() => {}); } catch {}
+}
+document.addEventListener("pointerdown", unlockAudio, { once: true });
 function pickVoice() {
   const vs = speechSynthesis.getVoices().filter(v => v.lang.toLowerCase().startsWith("pt"));
   voice = vs.find(v => /br/i.test(v.lang) && /(daniel|antonio|felipe|male)/i.test(v.name)) || vs.find(v => /br/i.test(v.lang)) || vs[0] || null;
@@ -209,12 +218,39 @@ function spoken(t) {
   const parts = t.match(/[^.!?]+[.!?]*/g) || [t];
   return (parts.length > 3 || t.length > 380) ? parts.slice(0, 2).join(" ") + " Os detalhes estão na tela." : t;
 }
-function say(text) {
-  if (!("speechSynthesis" in window) || !text) return;
-  speechSynthesis.cancel(); stopListening(); speaking = true; setState("speaking", "falando"); animateBars(true);
-  const u = new SpeechSynthesisUtterance(spoken(text)); u.lang = "pt-BR"; if (voice) u.voice = voice; u.rate = 1.05;
-  u.onend = u.onerror = () => { speaking = false; animateBars(false); convoUntil = Date.now() + 15000; setState(null, "online"); startListening(); };
+function doneSpeaking() { speaking = false; animateBars(false); convoUntil = Date.now() + 15000; setState(null, "online"); startListening(); }
+function freeUrl() { if (playingUrl) { URL.revokeObjectURL(playingUrl); playingUrl = null; } }
+function sayBrowser(t) {
+  if (!("speechSynthesis" in window)) return doneSpeaking();
+  const u = new SpeechSynthesisUtterance(t); u.lang = "pt-BR"; if (voice) u.voice = voice; u.rate = 1.05;
+  u.onend = u.onerror = doneSpeaking;
   speechSynthesis.speak(u);
+}
+async function say(text) {
+  if (!text) return;
+  const t = spoken(text), id = ++sayId;
+  if ("speechSynthesis" in window) speechSynthesis.cancel();
+  player.pause(); freeUrl(); stopListening(); speaking = true; setState("speaking", "falando"); animateBars(true);
+  if (TOKEN && Date.now() > serverVoiceOffUntil) {
+    try {
+      const r = await fetch(`/tts?token=${T()}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: t }) });
+      if (!r.ok) throw new Error("tts " + r.status);
+      const blob = await r.blob();
+      if (id !== sayId) return;                       // chegou outra fala no meio: descarta esta
+      playingUrl = URL.createObjectURL(blob);
+      player.onended = () => { if (id === sayId) { freeUrl(); doneSpeaking(); } };
+      player.onerror = () => { if (id === sayId) { freeUrl(); sayBrowser(t); } };
+      player.src = playingUrl;
+      await player.play();
+      return;
+    } catch (e) {
+      if (id !== sayId) return;
+      player.onended = player.onerror = null;              // não deixa o player disparar a fala de reserva de novo
+      if (!(e && e.name === "NotAllowedError")) serverVoiceOffUntil = Date.now() + 5 * 60 * 1000;  // servidor falhou: 5 min na voz do celular
+      freeUrl();
+    }
+  }
+  sayBrowser(t);
 }
 
 // ---------- escuta contínua: "Simba, ..." ----------
@@ -222,6 +258,12 @@ const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let rec = null, wantListen = true, pendingApproval = null;
 const YES = /^(sim|pode|autorizo|confirmo|confirma|manda|envia|ok|claro|isso|positivo|faca|faz|segue)\b/;
 const NO = /^(nao|cancela|negado|nega|para|pare|espera|negativo)\b/;
+// o reconhecimento em pt-BR costuma escrever "Simba" como "samba", "sinba", "zimba"...
+const WAKE = /\b(simba|samba|sinba|zimba|cimba|simbah|sim,? ba)\b[\s,.!?:-]*/;
+function afterWake(t) {  // comando depois da palavra de ativação, ou null se ela não foi dita
+  const src = t.normalize("NFC"), n = src.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  const m = WAKE.exec(n); return m ? src.slice(m.index + m[0].length).trim() : null;
+}
 function startListening() { if (!SR || speaking || !wantListen) return; try { rec.start(); } catch {} }
 function stopListening() { if (rec) try { rec.abort(); } catch {} }
 if (SR) {
@@ -231,7 +273,7 @@ if (SR) {
   rec.onresult = e => {
     let interim = "", final = "";
     for (let i = e.resultIndex; i < e.results.length; i++) (e.results[i].isFinal ? (final += e.results[i][0].transcript) : (interim += e.results[i][0].transcript));
-    if (interim && (pendingApproval || Date.now() < convoUntil || /simba/i.test(interim))) $("#heard").textContent = "› " + interim;
+    if (interim) $("#heard").textContent = "› " + interim;     // mostra o que o microfone está ouvindo
     if (final) handleUtterance(final.trim());
   };
   rec.onerror = e => { if (e.error === "not-allowed" || e.error === "service-not-allowed") { wantListen = false; showWake(); } };
@@ -239,15 +281,14 @@ if (SR) {
 } else { $("#mVoice").textContent = "texto"; }
 
 function handleUtterance(t) {
-  const n = norm(t);
+  const n = norm(t), rest = afterWake(t), woke = rest !== null;
   if (pendingApproval) {
-    const tail = n.replace(/^.*?\bsimba\b[\s,.!?:-]*/, "");
+    const tail = woke ? norm(rest) : n;
     if (YES.test(tail)) return answerApproval(true);
     if (NO.test(tail)) return answerApproval(false);
   }
-  const woke = /\bsimba\b/.test(n);
   if (!woke && Date.now() > convoUntil) return;
-  const cmd = woke ? t.replace(/^.*?\bsimba\b[\s,.!?:-]*/i, "").trim() : t;
+  const cmd = woke ? rest : t;
   if (!cmd) { $("#heard").textContent = "› Simba"; return say("Pois não, senhor?"); }
   if (/^(obrigad|valeu|era isso|so isso|pode parar|dispensado)/.test(norm(cmd))) { convoUntil = 0; return say("Às ordens."); }
   sendMessage(cmd);
@@ -272,7 +313,9 @@ function answerApproval(ok) {
 }
 
 // ---------- conexão com o servidor ----------
-let ws, lastSaid = "";
+let ws, lastSaid = "", turnText = [];
+const shown = t => t.replace(/\*\*(.+?)\*\*/g, "$1").replace(/__(.+?)__/g, "$1").replace(/^#{1,6}\s*/gm, "");
+function showSaid(t) { const s = $("#said"); s.textContent = t; s.classList.toggle("long", t.length > 160); s.scrollTop = 0; }
 function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
 function sendMessage(text) { $("#heard").textContent = "› " + text; send({ type: "message", text }); setState("thinking", "processando"); }
 function connect() {
@@ -284,11 +327,11 @@ function connect() {
     const ev = JSON.parse(e.data);
     switch (ev.type) {
       case "status": { const miss = Object.entries(ev.google || {}).filter(([, v]) => !v.ok).map(([c]) => c); setupNotice(miss); break; }
-      case "user": if (ev.device !== DEVICE) $("#heard").textContent = `› (${ev.device}) ${ev.text.slice(0, 120)}`;
+      case "user": turnText = []; if (ev.device !== DEVICE) $("#heard").textContent = `› (${ev.device}) ${ev.text.slice(0, 120)}`;
         setState("thinking", ev.device === "proativo" ? "agindo por conta própria" : ev.device === "rotina" ? "rotina" : "processando"); break;
       case "agent": agentState(ev.id, ev.state === "working", ev.task); break;
       case "tool": $("#stateTxt").textContent = ev.name.replace(/_/g, " "); break;
-      case "text": lastSaid = ev.text; $("#said").textContent = ev.text; break;
+      case "text": lastSaid = ev.text; turnText.push(shown(ev.text)); showSaid(turnText.join("\n\n")); break;
       case "done": setState(null, "online"); document.querySelectorAll(".ag.on").forEach(d => agentState(d.id.slice(3), false));
         if (lastSaid) say(lastSaid); lastSaid = ""; loadPanel(); break;
       case "approval": pendingApproval = ev.id; document.body.classList.add("alert");
@@ -315,6 +358,7 @@ function showWake() {
   $("#wake").classList.add("show"); $("#wake").onclick = activate;
 }
 async function activate() {
+  unlockAudio();
   $("#wake").classList.remove("show"); $("#wake").onclick = null; wantListen = true;
   try { const s = await navigator.mediaDevices.getUserMedia({ audio: true }); s.getTracks().forEach(t => t.stop()); } catch {}
   try { await setupPush(); } catch {}
