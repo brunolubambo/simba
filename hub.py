@@ -5,6 +5,7 @@ from fastapi import WebSocket
 from .config import DATA
 
 SUBS = DATA / "push_subscriptions.json"
+PUSH_TOO = os.getenv("SIMBA_PUSH_TAMBEM", "false").lower() == "true"   # com Telegram ligado, notificação do app também?
 
 
 class Hub:
@@ -13,6 +14,7 @@ class Hub:
         self.pending: dict[str, asyncio.Future] = {}
         self.suggestions: dict[str, dict] = {}
         self.on_suggest = None          # modo automático: o servidor executa a sugestão sozinho
+        self.mirror = None              # Telegram: recebe os avisos (async, devolve True se entregou)
 
     def add(self, ws: WebSocket, device: str):
         self.clients[ws] = device
@@ -32,7 +34,13 @@ class Hub:
                 dead.append(ws)
         for ws in dead:
             self.remove(ws)
-        if push:
+        delivered = False
+        if self.mirror and (push or ev.get("type") == "approval_closed"):
+            try:
+                delivered = bool(await asyncio.wait_for(self.mirror(ev), 20))
+            except Exception:
+                pass
+        if push and (PUSH_TOO or not delivered):    # chegou no Telegram: não repete a notificação do app
             try:
                 await asyncio.to_thread(send_push, ev)
             except Exception:

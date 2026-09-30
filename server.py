@@ -3,20 +3,20 @@ WebSocket /ws?token=...&device=pc|celular
   entrada: {type:message,text} | {type:approve,id,ok} | {type:accept,id} | {type:dismiss,id} | {type:reminder_snooze,id,min} | {type:observer,on}
   saída:   text | tool | done | approval | approval_closed | suggestion | activity | status | error
 HTTP: POST /upload?token= (imagem do celular, ex.: Atalho do iOS) | POST /push/subscribe | GET /push/key
-      POST /tts?token= (voz neural: {text} -> MP3)"""
+      POST /tts?token= ({text} -> {id}) + GET /tts/{id}?token= (voz neural em MP3, transmitida) | POST /telegram/webhook (mensagens do bot, ver telegram.py)"""
 import asyncio, json, os, re, secrets, time
 from datetime import date
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 load_dotenv()
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, HTTPException, Query, Body
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, HTTPException, Query, Body, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse, Response
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from .config import ROOT, WORKSPACE, ACCOUNTS, public_url
 from .core import Simba
-from .hub import Hub, save_sub, send_push, vapid
+from .hub import Hub, save_sub, send_push, vapid, PUSH_TOO
 from .observer import Observer
-from . import tasks, life, google, memory
+from . import tasks, life, google, memory, telegram
 from .agents import roster
 
 TOKEN = os.getenv("SIMBA_TOKEN", "")
@@ -36,21 +36,32 @@ def check(token: str):
 
 async def run_and_broadcast(text: str, origin: str):
     await hub.broadcast({"type": "user", "text": text, "device": origin})
-    last = ""
+    final: list[str] = []                    # texto depois da última ferramenta = a resposta final
     try:
         async for ev in state["simba"].ask(text):
             await hub.broadcast(ev)
-            if ev.get("type") == "text":
-                last = ev["text"]
-            elif ev.get("type") == "done":
+            kind = ev.get("type")
+            if kind == "text":
+                final.append(ev["text"])
+            elif kind == "tool" or (kind == "agent" and ev.get("state") == "working"):
+                final = []
+            elif kind == "done":
                 if STATS["day"] != date.today().isoformat():
                     STATS.update(day=date.today().isoformat(), tasks=0, cost=0.0)
                 STATS["tasks"] += 1
                 STATS["cost"] += ev.get("cost_usd") or 0
-        if origin == "rotina" and last:      # rotinas chegam no celular mesmo com o app fechado
+        last = "\n\n".join(t.strip() for t in final if t.strip())
+        if origin == "telegram" and not last:
+            last = "Feito."
+        sent = False
+        if last and origin in ("rotina", "proativo", "telegram"):   # chegam no Telegram mesmo com o app fechado
+            sent = await telegram.deliver(last, origin)
+        if origin == "rotina" and last and (not sent or PUSH_TOO):
             await asyncio.to_thread(send_push, {"titulo": "SIMBA", "motivo": last})
     except Exception as e:
         await hub.broadcast({"type": "error", "text": str(e)})
+        if origin == "telegram":
+            await telegram.deliver(f"Não consegui concluir: {e}"[:500], origin)
 
 
 def status() -> dict:
@@ -68,9 +79,11 @@ async def lifespan(app):
             asyncio.create_task(run_and_broadcast(s["acao"], "proativo"))
         hub.on_suggest = act
     state["observer"] = Observer(hub)
+    telegram.setup(hub, run_and_broadcast)
+    hub.mirror = telegram.notify
     bg = [asyncio.create_task(c) for c in (
-        state["observer"].run(), tasks.reminders_loop(hub), tasks.routines_loop(run_and_broadcast),
-        tasks.mail_loop(hub), tasks.calendar_loop(hub))]
+        state["simba"].warm(), state["observer"].run(), tasks.reminders_loop(hub), tasks.routines_loop(run_and_broadcast),
+        tasks.mail_loop(hub), tasks.calendar_loop(hub), telegram.setup_webhook())]
     yield
     for t in bg:
         t.cancel()
@@ -173,25 +186,61 @@ def speech_pieces(text: str, limit: int = 1800) -> list[str]:
     return [p for p in parts if p]
 
 
+TTS_JOBS: dict[str, str] = {}
+
+
 @app.post("/tts")
 async def tts(body: dict = Body(...), token: str = Query("")):
-    """Voz do SIMBA: devolve um MP3 com a voz neural. Se falhar, o app usa a voz do próprio celular."""
+    """Guarda a fala e devolve um id. O player abre GET /tts/{id}, que toca enquanto o áudio ainda chega."""
     check(token)
     text = str(body.get("text", "")).strip()
     if not text:
         raise HTTPException(400, "texto vazio")
-    audio = bytearray()
-    try:
+    while len(TTS_JOBS) >= 20:
+        TTS_JOBS.pop(next(iter(TTS_JOBS)))
+    job = secrets.token_urlsafe(12)
+    TTS_JOBS[job] = text
+    return {"id": job}
+
+
+@app.get("/tts/{job}")
+async def tts_stream(job: str, token: str = Query("")):
+    """Voz neural em MP3, enviada pedaço a pedaço. Se falhar antes do primeiro pedaço, o app usa a voz do celular."""
+    check(token)
+    text = TTS_JOBS.pop(job, None)
+    if not text:
+        raise HTTPException(404, "fala expirada")
+    # region agent log
+    import time as _t, json as _j; _t0 = _t.perf_counter()
+    def _dbg(m, **d):
+        open(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cursor", "debug-f7a251.log"), "a", encoding="utf-8").write(_j.dumps({"sessionId": "f7a251", "runId": "post-fix", "hypothesisId": "B", "location": "server.py:tts_stream", "message": m, "data": {**d, "chars": len(text), "ms": round((_t.perf_counter() - _t0) * 1000)}, "timestamp": int(_t.time() * 1000)}) + "\n")
+    # endregion
+
+    async def audio():
         import edge_tts
         for piece in speech_pieces(text):
             async for chunk in edge_tts.Communicate(piece, VOICE, rate=VOICE_RATE, pitch=VOICE_PITCH).stream():
                 if chunk["type"] == "audio":
-                    audio.extend(chunk["data"])
+                    yield chunk["data"]
+        # region agent log
+        _dbg("tts stream finished")
+        # endregion
+
+    chunks = audio()
+    try:
+        first = await chunks.__anext__()
     except Exception as e:
         raise HTTPException(503, f"voz indisponível: {e}"[:200])
-    if not audio:
-        raise HTTPException(503, "voz indisponível")
-    return Response(bytes(audio), media_type="audio/mpeg", headers={"Cache-Control": "no-store"})
+    # region agent log
+    _dbg("tts first chunk sent")
+    # endregion
+
+    async def body():
+        yield first
+        async for data in chunks:
+            yield data
+
+    return StreamingResponse(body(), media_type="audio/mpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/health")
@@ -224,6 +273,19 @@ async def google_callback(state: str = "", code: str = "", error: str = ""):
 def push_subscribe(sub: dict = Body(...), token: str = Query("")):
     check(token)
     save_sub(sub)
+    return {"ok": True}
+
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request):
+    """O Telegram entrega aqui as mensagens e os toques nos botões do bot (conferido pelo cabeçalho secreto)."""
+    if not telegram.valid_secret(request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")):
+        raise HTTPException(401, "não autorizado")
+    try:
+        update = await request.json()
+    except Exception:
+        return {"ok": True}
+    asyncio.create_task(telegram.handle_update(update))
     return {"ok": True}
 
 

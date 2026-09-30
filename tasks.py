@@ -3,7 +3,7 @@ import asyncio, json, re
 from datetime import timedelta
 from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, TextBlock
 from .config import DATA, PROMPTS, FAST_MODEL, now
-from . import life, google
+from . import life, google, telegram
 
 ROUTINES = DATA / "routines.json"
 SEEN = DATA / "seen_mail.json"
@@ -70,7 +70,7 @@ async def mail_loop(hub, interval_min: int = 10):
                 new = [m for m in msgs if m["id"] not in known]
                 seen[conta] = (list(known) + [m["id"] for m in new])[-1000:]
                 SEEN.write_text(json.dumps(seen))
-                if first_time or not new or (not hub.clients and not hub.has_push()):
+                if first_time or not new or (not hub.clients and not hub.has_push() and not telegram.ready()):
                     continue
                 lista = "\n".join(f"id={m['id']} | de={m['de']} | assunto={m['assunto']} | {m['trecho']}" for m in new)
                 items = await fast_json((PROMPTS / "mail_triage.md").read_text(), f"Conta: {conta}\n{lista}") or []

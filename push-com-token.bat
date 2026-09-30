@@ -1,31 +1,5 @@
 @echo off
-REM SIMBA - Push com Token (execute no seu PC)
-
-echo.
-echo 🚀 SIMBA - Push para GitHub
-echo.
-
-git config user.email "brunolubambo@gmail.com"
-git config user.name "Bruno Lubambo"
-
-git init
-git add .
-git commit -m "SIMBA: assistente pessoal com 18 agentes, voz, tela e memória" 2>nul
-
-git remote remove origin 2>nul
-git remote add origin https://brunolubambo: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@github.com/brunolubambo/simba.git
-
-git branch -M main
-git push -u origin main
-
-if errorlevel 1 (
-  echo.
-  echo ❌ Erro no push
-  echo Tente manualmente: git push -u origin main
-) else (
-  echo.
-  echo ✅ Push concluído!
-  echo https://github.com/brunolubambo/simba
-)
-
+REM Desativado em 30/09/2026: este script tinha um token do GitHub (revogado), fazia "git add ."
+REM e renomeava a branch simba para main. Para enviar mudancas, use o Cursor (Commit e Push).
+echo Script desativado. Use o Cursor para enviar as mudancas ao GitHub.
 pause

@@ -1,5 +1,5 @@
 """Níveis de autonomia aplicados a cada chamada de ferramenta.
-Livre: ler, buscar, rascunhar, registrar dados locais, navegar/ler sites.
+Livre: ler, buscar, rascunhar, registrar dados locais, navegar/ler sites, criar documentos e mandar ao próprio Telegram.
 Pede aprovação: enviar e-mail (exceto para as contas do próprio usuário), remover evento, evento com convidados, clicar/digitar em sites,
 comandos sensíveis, escrita fora do workspace. Bloqueado: comandos destrutivos."""
 import re
@@ -14,7 +14,9 @@ FREE = {"Read", "Glob", "Grep", "WebSearch", "WebFetch", "TodoWrite", "Task", "A
         "mcp__google__gmail_marcar_lido", "mcp__google__agenda_listar",
         "mcp__google__drive_buscar", "mcp__google__drive_ler",
         "mcp__squad__agente_criar", "mcp__squad__agente_listar"} | browser.FREE
-FREE_PREFIX = ("mcp__vida__",)   # dados locais, reversíveis
+FREE_PREFIX = ("mcp__vida__",     # dados locais, reversíveis
+               "mcp__telegram__",  # mensagens para o chat do próprio Bruno
+               "mcp__docs__")      # documentos criados no workspace
 BLOCKED_BASH = [r"\brm\s+-rf?\s+(/|~|\$HOME)", r"\bsudo\b", r"\bmkfs\b", r"\bdd\s+if=",
                 r":\(\)\s*\{", r"\bchmod\s+-R\s+777\s+/", r"curl[^|]*\|\s*(ba)?sh"]
 ALWAYS_ASK_BASH = [r"\bvercel\b.*--prod", r"\bgit\s+push\b", r"\bnpm\s+publish\b", r"\brm\b"]

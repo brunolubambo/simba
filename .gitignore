@@ -6,3 +6,5 @@ workspace/
 __pycache__/
 *.pyc
 .venv/
+# Logs de depuração (ex.: modo Debug do Cursor)
+*.log

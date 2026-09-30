@@ -27,21 +27,16 @@ body::after{content:"";position:fixed;inset:0;pointer-events:none;
   background:repeating-linear-gradient(0deg,rgba(0,0,0,.18) 0 1px,transparent 1px 3px)}
 .label{font-family:Orbitron,sans-serif;letter-spacing:.18em;text-transform:uppercase;font-size:10px;color:var(--muted)}
 
-#top{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:10px 12px 6px;padding-top:max(10px,env(safe-area-inset-top))}
-.metric{border:1px solid var(--holo-dim);background:rgba(4,20,32,.55);padding:6px 8px;clip-path:polygon(8px 0,100% 0,100% calc(100% - 8px),calc(100% - 8px) 100%,0 100%,0 8px)}
-.metric b{display:block;font-family:Orbitron,sans-serif;font-weight:500;font-size:14px;color:var(--holo);text-shadow:var(--glow);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-
-#stage{display:grid;place-items:center;padding-top:4px}
-#core{width:min(88vw,380px);height:min(46vw,250px);display:block}
-#state{margin-top:-4px;text-align:center}
+#stage{flex:1;position:relative;min-height:0}
+#core{position:absolute;inset:0;width:100%;height:100%;display:block}
+#state{position:absolute;left:0;right:0;bottom:10px;text-align:center}
 #state .label{color:var(--holo)}
 
-#caption{min-height:52px;padding:6px 18px 4px;text-align:center}
+#caption{padding:4px 18px 2px;text-align:center}
 #heard{color:var(--muted);font-size:15px;min-height:20px}
-#said{font-size:18px;font-weight:500;text-shadow:0 0 8px rgba(94,231,255,.35);white-space:pre-line;max-height:42vh;overflow-y:auto;overscroll-behavior:contain}
-#said.long{font-size:16px;text-align:left}
+#said{display:none}
 
-#alerts{padding:0 12px;display:flex;flex-direction:column;gap:6px}
+#alerts{position:fixed;top:max(10px,env(safe-area-inset-top));left:12px;width:min(300px,calc(100vw - 24px));z-index:4;display:flex;flex-direction:column;gap:6px}
 .alert{border:1px solid var(--amber);background:rgba(40,26,4,.75);padding:8px 10px;color:#ffe2b0;font-size:15px;
   clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px)}
 .alert.info{border-color:var(--holo);background:rgba(4,26,40,.75);color:var(--text)}
@@ -51,7 +46,7 @@ body::after{content:"";position:fixed;inset:0;pointer-events:none;
 .alert .row{display:flex;gap:8px;margin-top:6px;flex-wrap:wrap}
 .alert button{font:600 14px Rajdhani,sans-serif;letter-spacing:.08em;background:transparent;border:1px solid currentColor;color:inherit;padding:6px 12px;min-height:36px}
 
-#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(86px,1fr));gap:6px;padding:8px 12px;overflow-y:auto;flex:1;align-content:start}
+#grid{display:none}
 .ag{border:1px solid var(--holo-faint);background:rgba(4,18,30,.5);padding:6px 5px 5px;text-align:center;transition:all .25s;
   clip-path:polygon(6px 0,100% 0,100% calc(100% - 6px),calc(100% - 6px) 100%,0 100%,0 6px)}
 .ag .n{font-family:Orbitron,sans-serif;font-size:9px;letter-spacing:.06em;text-transform:uppercase;line-height:1.3;min-height:24px;display:grid;place-items:center}
@@ -80,17 +75,10 @@ footer{display:flex;gap:8px;padding:8px 12px;padding-bottom:max(8px,env(safe-are
 </head>
 <body>
 <h1 class="sr">SIMBA, assistente pessoal</h1>
-<div id="top" aria-label="Métricas">
-  <div class="metric"><span class="label">Tarefas</span><b id="mTasks">0</b></div>
-  <div class="metric"><span class="label">Online</span><b id="mUp">--</b></div>
-  <div class="metric"><span class="label">Voz</span><b id="mVoice">--</b></div>
-  <div class="metric"><span class="label">Memória</span><b id="mMem">--</b></div>
-</div>
-
-<section id="stage" aria-hidden="true">
-  <canvas id="core"></canvas>
+<section id="stage">
+  <canvas id="core" aria-hidden="true"></canvas>
+  <div id="state"><span class="label" id="stateTxt">iniciando</span></div>
 </section>
-<div id="state"><span class="label" id="stateTxt">iniciando</span></div>
 
 <div id="caption" aria-live="polite">
   <div id="heard"></div>
@@ -122,11 +110,24 @@ let TOKEN = store.get("st") || "";
 const DEVICE = /Android|iPhone|iPad/i.test(navigator.userAgent) ? "celular" : "pc";
 const T = () => encodeURIComponent(TOKEN);
 
-// ---------- globo: esfera calma em silêncio, malha que segue a voz ----------
+// ---------- globo: silêncio = esfera azul estável; falando = malha orgânica azul-violeta com arco de luz ----------
 const globe = $("#core"), gctx = globe.getContext("2d");
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
-const LAT = 16, LON = 28;
+const LAT = 32, LON = 60;
+const MOTES = Array.from({ length: 46 }, () => ({ x: Math.random() * 2 - 1, v: 0.08 + Math.random() * 0.16, p: Math.random(), s: 0.6 + Math.random() * 1.4 }));
+// ondas em 3D (direção, frequência, velocidade, fase, peso): deformação suave, sem costura nos polos
+const WAVES = [
+  [0.62, 0.55, 0.56, 3.4, 0.9, 0.0, 0.2], [-0.71, 0.31, 0.63, 4.6, -1.2, 1.7, 0.17],
+  [0.18, -0.93, 0.32, 5.3, 1.4, 3.1, 0.15], [-0.4, -0.52, -0.75, 7.1, -1.7, 0.6, 0.13],
+  [0.88, -0.2, -0.43, 8.6, 2.1, 2.4, 0.12], [-0.1, 0.8, -0.59, 10.2, -2.4, 4.2, 0.1],
+  [0.5, -0.7, 0.5, 12.4, 2.5, 0.3, 0.08], [0.35, 0.35, -0.87, 14.1, 2.8, 1.1, 0.06],
+  [-0.8, -0.5, 0.33, 16.3, -3.1, 5.0, 0.05]];
+const SILENT = [150, 220, 255];
+const BANDS = [[90, 175, 255], [115, 135, 255], [155, 100, 255], [205, 85, 245], [255, 80, 215]];
+const lerp3 = (a, b, k) => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+const rgba = (c, a) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${Math.max(0, Math.min(1, a)).toFixed(3)})`;
 let yaw = 0, voiceLevel = 0, audioCtx, analyser, mediaSrc, voiceBins;
+let talk = 0, phase = 0, lastFrame = 0, hudGain = 1;
 function resizeGlobe() {
   const dpr = Math.min(devicePixelRatio || 1, 2);
   const w = globe.clientWidth, h = globe.clientHeight;
@@ -160,96 +161,333 @@ function sampleVoice(speaking, t) {
   const env = 0.28 + 0.72 * Math.abs(Math.sin(t * 7.2)) * (0.5 + 0.5 * Math.abs(Math.sin(t * 13.1)));
   return voiceLevel * 0.35 + env * 0.65;
 }
-function project(x, y, z, cx, cy, scale) {
+function project(x, y, z, cx, cy, scale, pitch) {
   const x1 = x * Math.cos(yaw) + z * Math.sin(yaw);
   const z1 = -x * Math.sin(yaw) + z * Math.cos(yaw);
-  const pitch = 0.42;
   const y2 = y * Math.cos(pitch) - z1 * Math.sin(pitch);
   const z2 = y * Math.sin(pitch) + z1 * Math.cos(pitch);
   const p = 2.6 / (2.6 + z2);
   return [cx + x1 * scale * p, cy + y2 * scale * p, z2, x1];
 }
-function spherePoint(lat, lon, amp, t) {
-  const th = lat * Math.PI / LAT, ph = lon * 2 * Math.PI / LON;
-  const wave = Math.sin(th * 2 + t * 1.7) * Math.cos(ph * 3 - t * 1.1) + 0.35 * Math.sin(ph * 2 + t * 2.2);
-  const r = 1 + amp * 0.22 * wave;
-  const st = Math.sin(th) * r;
-  return [st * Math.cos(ph), Math.cos(th) * r, st * Math.sin(ph)];
+function blob(x, y, z, ph) {
+  let s = 0;
+  for (const [a, b, c, f, v, o, k] of WAVES) s += k * Math.sin(f * (a * x + b * y + c * z) + v * ph + o);
+  return s;
 }
-function ink(xSide, amp) {
-  const m = amp <= 0.02 ? 0 : Math.max(0, Math.min(1, 0.25 + amp * (0.35 + xSide)));
-  const r = 94 + (236 - 94) * m, g = 220 + (78 - 220) * m, b = 255 + (230 - 255) * m;
-  return `rgba(${r|0},${g|0},${b|0},`;
+function spherePoint(lat, lon, amp, ph) {
+  const th = lat * Math.PI / LAT, lo = lon * 2 * Math.PI / LON;
+  const x = Math.sin(th) * Math.cos(lo), y = Math.cos(th), z = Math.sin(th) * Math.sin(lo);
+  const r = amp ? 1 + amp * blob(x, y, z, ph) : 1;
+  return [x * r, y * r, z * r];
+}
+// ---------- HUD do chão: faixas com espessura, blocos, profundidade, mesa, reflexo e ondas da voz ----------
+const seeded = (s => () => (s = (s * 16807) % 2147483647) / 2147483647)(20260930);
+const OUTER_BLOCKS = (() => {
+  const out = []; let a = 0;
+  while (a < Math.PI * 2 - 0.05) {
+    const len = 0.05 + seeded() * 0.32;
+    out.push([a, Math.min(a + len, Math.PI * 2 - 0.02), seeded() < 0.3]);
+    a += len + 0.025 + seeded() * 0.06;
+  }
+  return out;
+})();
+const ripples = [];
+let lastRipple = 0, flick = 1, glitchAt = 0, glitchUntil = 0;
+function band(cx, cy, rx, ry, k0, k1, a0 = 0, a1 = Math.PI * 2) {
+  gctx.beginPath();
+  gctx.ellipse(cx, cy, rx * k1, ry * k1, 0, a0, a1);
+  gctx.ellipse(cx, cy, rx * k0, ry * k0, 0, a1, a0, true);
+  gctx.closePath();
+  gctx.fill();
+}
+function edge(cx, cy, rx, ry, k, width, a0 = 0, a1 = Math.PI * 2) {
+  gctx.beginPath();
+  gctx.ellipse(cx, cy, rx * k, ry * k, 0, a0, a1);
+  gctx.lineWidth = width;
+  gctx.stroke();
+}
+function drawTable(cx, baseY, rx, ry, w, h, t) {
+  const top = baseY - ry * 1.9;
+  const desk = gctx.createLinearGradient(0, top, 0, h);
+  desk.addColorStop(0, "rgba(3,12,28,0)");
+  desk.addColorStop(0.25, "rgba(3,11,24,.55)");
+  desk.addColorStop(1, "rgba(1,5,12,.92)");
+  gctx.fillStyle = desk;
+  gctx.fillRect(0, top, w, h - top);
+  softEllipse(cx, baseY, rx * 2.3, ry * 2.4, rgba(lerp3([60, 160, 255], [120, 90, 255], talk * 0.4), 0.22 * flick));
+}
+function softEllipse(x, y, rx, ry, color) {
+  gctx.save();
+  gctx.translate(x, y);
+  gctx.scale(1, ry / rx);
+  const g = gctx.createRadialGradient(0, 0, 0, 0, 0, rx);
+  g.addColorStop(0, color);
+  g.addColorStop(1, "rgba(30,90,200,0)");
+  gctx.fillStyle = g;
+  gctx.beginPath(); gctx.arc(0, 0, rx, 0, Math.PI * 2); gctx.fill();
+  gctx.restore();
+}
+function drawReflection(cx, baseY, cy, scale) {
+  const R = scale * 1.05;
+  softEllipse(cx, baseY + (baseY - cy) * 0.42, R, R * 0.3, rgba(lerp3([90, 180, 255], [170, 90, 255], talk), 0.16 * flick));
+}
+function floorLayer(cx, baseY, rx, ry, t, front) {
+  const spin = reduceMotion ? 0 : t * 0.11, depth = (front ? 1 : 0.5) * flick;
+  gctx.save();
+  gctx.beginPath();
+  if (front) gctx.rect(0, baseY, globe.clientWidth, globe.clientHeight - baseY);
+  else gctx.rect(0, 0, globe.clientWidth, baseY);
+  gctx.clip();
+  const fill = gctx.createLinearGradient(0, baseY - ry, 0, baseY + ry);
+  fill.addColorStop(0, "rgba(70,160,255,.45)");
+  fill.addColorStop(1, "rgba(170,228,255,1)");
+  gctx.fillStyle = fill;
+  gctx.strokeStyle = "rgba(200,240,255,1)";
+  const A = (a) => { gctx.globalAlpha = Math.min(1, a * depth * hudGain); };
+  A(0.22); edge(cx, baseY, rx, ry, 1.07, 1);
+  A(0.5); band(cx, baseY, rx, ry, 0.985, 1.005);
+  for (const [a0, a1, hot] of OUTER_BLOCKS) { A(hot ? 0.95 : 0.55); band(cx, baseY, rx, ry, 0.86, 0.945, a0 + spin, a1 + spin); }
+  A(0.35); edge(cx, baseY, rx, ry, 0.83, 1);
+  A(0.85); band(cx, baseY, rx, ry, 0.72, 0.765);
+  for (let i = 0; i < 64; i++) {
+    const a0 = -spin * 1.5 + i * Math.PI * 2 / 64;
+    A(i % 8 === 0 ? 0.9 : 0.45); band(cx, baseY, rx, ry, 0.6, 0.66, a0, a0 + Math.PI * 2 / 64 * 0.55);
+  }
+  A(0.7); band(cx, baseY, rx, ry, 0.47, 0.495);
+  for (let i = 0; i < 3; i++) {
+    const a0 = spin * 2.4 + i * Math.PI * 2 / 3;
+    A(0.6); band(cx, baseY, rx, ry, 0.36, 0.39, a0, a0 + 1.5);
+  }
+  A(0.9); band(cx, baseY, rx, ry, 0.2, 0.235);
+  gctx.lineWidth = 1;
+  for (let i = 0; i < 120; i++) {
+    const a = (i / 120) * Math.PI * 2 + spin * 0.4, major = i % 15 === 0;
+    A(major ? 0.95 : 0.3);
+    gctx.lineWidth = major ? 2 : 1;
+    gctx.beginPath();
+    gctx.moveTo(cx + Math.cos(a) * rx * (major ? 1.0 : 1.02), baseY + Math.sin(a) * ry * (major ? 1.0 : 1.02));
+    gctx.lineTo(cx + Math.cos(a) * rx * 1.06, baseY + Math.sin(a) * ry * 1.06);
+    gctx.stroke();
+  }
+  if (front) { A(0.9); edge(cx, baseY, rx, ry, 1.005, 1.4, 0.15, Math.PI - 0.15); }
+  const now = t;
+  for (const r of ripples) {
+    const age = (now - r) / 1.3;
+    if (age < 0 || age > 1) continue;
+    gctx.globalAlpha = (1 - age) * (1 - age) * talk * depth;
+    gctx.strokeStyle = rgba(lerp3([120, 210, 255], [180, 110, 255], age), 1);
+    edge(cx, baseY, rx, ry, 0.22 + age * 0.95, 2.2 - age * 1.4);
+  }
+  gctx.globalAlpha = depth;
+  const core = gctx.createRadialGradient(cx, baseY, 0, cx, baseY, rx * 0.19);
+  core.addColorStop(0, "rgba(225,247,255,.9)");
+  core.addColorStop(0.55, "rgba(90,180,255,.35)");
+  core.addColorStop(1, "rgba(40,120,255,0)");
+  gctx.fillStyle = core;
+  gctx.beginPath(); gctx.ellipse(cx, baseY, rx * 0.19, ry * 0.19, 0, 0, Math.PI * 2); gctx.fill();
+  gctx.restore();
+}
+function drawBeam(cx, baseY, cy, scale, floorRx, t) {
+  const top = cy + scale * 0.7, bottom = baseY;
+  const topW = scale * 0.5, botW = floorRx * 0.2;
+  for (const k of [1, 0.72, 0.46, 0.24]) {
+    const beam = gctx.createLinearGradient(cx, top, cx, bottom);
+    beam.addColorStop(0, "rgba(120,200,255,0)");
+    beam.addColorStop(1, "rgba(90,190,255,.075)");
+    gctx.fillStyle = beam;
+    gctx.beginPath();
+    gctx.moveTo(cx - topW * k, top); gctx.lineTo(cx + topW * k, top);
+    gctx.lineTo(cx + botW * k, bottom); gctx.lineTo(cx - botW * k, bottom);
+    gctx.closePath(); gctx.fill();
+  }
+  if (reduceMotion) return;
+  for (const m of MOTES) {
+    const k = (m.p + t * m.v) % 1;
+    const y = bottom - (bottom - top) * k;
+    const x = cx + m.x * (botW + (topW - botW) * k) * 0.9;
+    gctx.fillStyle = `rgba(190,235,255,${(Math.sin(k * Math.PI) * 0.7).toFixed(3)})`;
+    gctx.beginPath(); gctx.arc(x, y, m.s, 0, Math.PI * 2); gctx.fill();
+  }
+}
+function drawArc(cx, cy, R, t, level) {
+  const ar = R * (1.28 + 0.035 * level), sway = reduceMotion ? 0 : Math.sin(t * 0.45) * 0.22;
+  gctx.save();
+  gctx.translate(cx, cy);
+  gctx.rotate(-0.22 + sway);
+  const grad = gctx.createLinearGradient(-ar, 0, ar, 0);
+  grad.addColorStop(0, rgba([70, 200, 255], talk));
+  grad.addColorStop(0.5, rgba([150, 115, 255], talk));
+  grad.addColorStop(1, rgba([255, 75, 220], talk));
+  gctx.strokeStyle = grad;
+  gctx.shadowColor = rgba([185, 95, 255], 0.95 * talk);
+  gctx.shadowBlur = 24;
+  gctx.lineWidth = 2.2 + 2.6 * level;
+  gctx.beginPath(); gctx.ellipse(0, 0, ar, ar * 0.97, 0, Math.PI * 0.95, Math.PI * 2.42); gctx.stroke();
+  gctx.shadowBlur = 10;
+  gctx.lineWidth = 1;
+  gctx.beginPath(); gctx.ellipse(0, 0, ar * 1.035, ar * 1.0, 0, Math.PI * 1.25, Math.PI * 1.85); gctx.stroke();
+  gctx.beginPath(); gctx.ellipse(0, 0, ar * 0.975, ar * 0.95, 0, Math.PI * 2.05, Math.PI * 2.5); gctx.stroke();
+  gctx.restore();
+  gctx.shadowBlur = 0;
+}
+function drawSphere(cx, cy, scale, t) {
+  const R = scale * 1.08, level = voiceLevel, amp = talk * (0.12 + 0.12 * level), calm = 1 - talk;
+  const halo = gctx.createRadialGradient(cx, cy, R * 0.6, cx, cy, R * 1.85);
+  halo.addColorStop(0, rgba(lerp3([70, 170, 255], [150, 80, 255], talk), 0.35 + 0.18 * talk * level));
+  halo.addColorStop(1, "rgba(60,120,255,0)");
+  gctx.fillStyle = halo;
+  gctx.beginPath(); gctx.arc(cx, cy, R * 1.85, 0, Math.PI * 2); gctx.fill();
+  if (calm > 0.01) {
+    const body = gctx.createRadialGradient(cx - R * 0.25, cy - R * 0.3, R * 0.05, cx, cy, R);
+    body.addColorStop(0, rgba([90, 180, 255], 0.2 * calm));
+    body.addColorStop(0.65, rgba([30, 110, 220], 0.16 * calm));
+    body.addColorStop(0.92, rgba([80, 180, 255], 0.34 * calm));
+    body.addColorStop(1, rgba([170, 230, 255], 0.55 * calm));
+    gctx.fillStyle = body;
+    gctx.beginPath(); gctx.arc(cx, cy, R, 0, Math.PI * 2); gctx.fill();
+  }
+  if (talk > 0.01) {
+    const core = gctx.createRadialGradient(cx, cy, 0, cx, cy, R * (1 + amp));
+    core.addColorStop(0, rgba([110, 70, 230], 0.22 * talk));
+    core.addColorStop(0.75, rgba([140, 70, 240], 0.16 * talk));
+    core.addColorStop(1, rgba([220, 80, 255], 0));
+    gctx.fillStyle = core;
+    gctx.beginPath(); gctx.arc(cx, cy, R * (1 + amp), 0, Math.PI * 2); gctx.fill();
+  }
+  const pts = [];
+  for (let lat = 0; lat <= LAT; lat++) {
+    const row = [];
+    for (let lon = 0; lon < LON; lon++) row.push(project(...spherePoint(lat, lon, amp, phase), cx, cy, scale, 0.2));
+    pts.push(row);
+  }
+  const N = 4, C = BANDS.length, paths = Array.from({ length: N * C }, () => new Path2D());
+  const add = (a, b) => {
+    const d = ((a[2] + b[2]) / 2 + 1) / 2;
+    const u = Math.max(0, Math.min(0.999, 0.5 + 0.3 * ((a[0] + b[0]) / 2 - cx) / R + 0.42 * ((a[1] + b[1]) / 2 - cy) / R));
+    const p = paths[((u * C) | 0) * N + Math.min(N - 1, (d * N) | 0)];
+    p.moveTo(a[0], a[1]); p.lineTo(b[0], b[1]);
+  };
+  for (let lat = 0; lat <= LAT; lat++) {
+    for (let lon = 0; lon < LON; lon++) {
+      const a = pts[lat][lon];
+      if (lat > 0 && lat < LAT) add(a, pts[lat][(lon + 1) % LON]);
+      const edge = Math.min(lat, LAT - 1 - lat);          // afina os meridianos perto dos polos
+      if (lat < LAT && (edge > 2 || lon % (edge > 0 ? 2 : 4) === 0)) add(a, pts[lat + 1][lon]);
+    }
+  }
+  gctx.globalCompositeOperation = "lighter";
+  const shimmer = reduceMotion ? 1 : 0.94 + 0.06 * Math.sin(t * 2.3);
+  for (let c = 0; c < C; c++) {
+    const col = lerp3(SILENT, BANDS[c], talk), hi = lerp3(col, [255, 255, 255], 0.18 * calm);
+    for (let i = 0; i < N; i++) {
+      const d = (i + 0.5) / N, path = paths[c * N + i];
+      gctx.strokeStyle = rgba(lerp3([60, 160, 255], col, talk), (0.05 + 0.15 * d) * (1 + 0.35 * talk * level));
+      gctx.lineWidth = 3.2;
+      gctx.stroke(path);
+      gctx.strokeStyle = rgba(hi, (0.14 + 0.74 * d) * shimmer);
+      gctx.lineWidth = 0.5 + 0.75 * d;
+      gctx.stroke(path);
+    }
+  }
+  if (calm > 0.01) {
+    gctx.beginPath(); gctx.arc(cx, cy, R, 0, Math.PI * 2);
+    gctx.strokeStyle = rgba([170, 230, 255], 0.55 * calm);
+    gctx.lineWidth = 2;
+    gctx.shadowColor = rgba([90, 190, 255], calm);
+    gctx.shadowBlur = 18;
+    gctx.stroke();
+    gctx.shadowBlur = 0;
+    const spec = gctx.createRadialGradient(cx - R * 0.38, cy - R * 0.42, 0, cx - R * 0.38, cy - R * 0.42, R * 0.55);
+    spec.addColorStop(0, rgba([220, 245, 255], 0.28 * calm));
+    spec.addColorStop(1, "rgba(220,245,255,0)");
+    gctx.fillStyle = spec;
+    gctx.beginPath(); gctx.arc(cx, cy, R, 0, Math.PI * 2); gctx.fill();
+    if (!reduceMotion) {
+      const sy = cy - R + ((t * 0.18) % 1) * R * 2, half = Math.sqrt(Math.max(0, R * R - (sy - cy) ** 2));
+      const scan = gctx.createLinearGradient(cx, sy - 10, cx, sy + 10);
+      scan.addColorStop(0, "rgba(160,225,255,0)");
+      scan.addColorStop(0.5, rgba([190, 240, 255], 0.22 * calm));
+      scan.addColorStop(1, "rgba(160,225,255,0)");
+      gctx.fillStyle = scan;
+      gctx.fillRect(cx - half, sy - 10, half * 2, 20);
+    }
+  }
+  if (talk > 0.01) drawArc(cx, cy, R, t, level);
+  gctx.globalCompositeOperation = "source-over";
 }
 function drawGlobe(t) {
   const w = globe.clientWidth, h = globe.clientHeight;
   if (!w || !h) return;
   gctx.clearRect(0, 0, w, h);
-  const cx = w * 0.5, baseY = h * 0.78, scale = Math.min(w, h) * 0.34;
-  const cy = baseY - scale * 0.95;
+  const cx = w * 0.5, scale = Math.min(w * 0.24, h * 0.24);
+  const baseY = h * 0.8, bob = reduceMotion ? 0 : Math.sin(t * 1.1) * scale * 0.035;
+  const cy = baseY - scale * 1.95 + bob;
   gctx.lineCap = "round";
-  for (let i = 4; i >= 0; i--) {
-    gctx.beginPath();
-    gctx.ellipse(cx, baseY, scale * (0.55 + i * 0.28), scale * (0.12 + i * 0.045), 0, 0, Math.PI * 2);
-    gctx.strokeStyle = `rgba(70,176,255,${0.5 - i * 0.08})`;
-    gctx.lineWidth = i === 1 ? 2.4 : 1;
-    gctx.shadowColor = "rgba(40,160,255,.65)";
-    gctx.shadowBlur = 8;
-    gctx.stroke();
+  gctx.lineJoin = "round";
+  const rx = scale * 1.9, ry = rx * 0.27;
+  drawTable(cx, baseY, rx, ry, w, h, t);
+  gctx.globalCompositeOperation = "lighter";
+  drawReflection(cx, baseY, cy, scale);
+  floorLayer(cx, baseY, rx, ry, t, false);
+  drawBeam(cx, baseY, cy, scale, rx, t);
+  floorLayer(cx, baseY, rx, ry, t, true);
+  gctx.globalCompositeOperation = "source-over";
+  drawSphere(cx, cy, scale, t);
+}
+const bloomCv = document.createElement("canvas"), bctx = bloomCv.getContext("2d");
+const bloomOK = (() => { bctx.filter = "blur(2px)"; return bctx.filter === "blur(2px)"; })();
+function applyBloom() {
+  if (!bloomOK || !globe.width) return;
+  const div = DEVICE === "celular" ? 4 : 2;
+  const bw = Math.max(1, globe.width / div | 0), bh = Math.max(1, globe.height / div | 0);
+  if (bloomCv.width !== bw || bloomCv.height !== bh) { bloomCv.width = bw; bloomCv.height = bh; }
+  bctx.filter = "none";
+  bctx.clearRect(0, 0, bw, bh);
+  bctx.filter = `blur(${DEVICE === "celular" ? 3 : 6}px)`;
+  bctx.drawImage(globe, 0, 0, bw, bh);
+  gctx.save();
+  gctx.setTransform(1, 0, 0, 1, 0, 0);
+  gctx.globalCompositeOperation = "lighter";
+  gctx.globalAlpha = 0.55 + 0.25 * talk * voiceLevel;
+  gctx.drawImage(bloomCv, 0, 0, globe.width, globe.height);
+  gctx.restore();
+}
+function applyGlitch(t) {
+  if (reduceMotion) return;
+  if (!glitchAt) glitchAt = t + 5 + Math.random() * 6;
+  if (t >= glitchAt) { glitchUntil = t + 0.09 + Math.random() * 0.08; glitchAt = t + 5 + Math.random() * 7; }
+  if (t > glitchUntil) return;
+  gctx.save();
+  gctx.setTransform(1, 0, 0, 1, 0, 0);
+  for (let i = 0; i < 2; i++) {
+    const hs = 4 + Math.random() * 14 | 0, y = Math.random() * (globe.height - hs) | 0, dx = (Math.random() - 0.5) * 18;
+    gctx.globalAlpha = 0.7;
+    gctx.drawImage(globe, 0, y, globe.width, hs, dx, y, globe.width, hs);
   }
-  gctx.shadowBlur = 0;
-  const amp = voiceLevel;
-  const segs = [];
-  const at = (lat, lon) => project(...spherePoint(lat, lon, amp, t), cx, cy, scale);
-  for (let lat = 0; lat <= LAT; lat++) {
-    for (let lon = 0; lon < LON; lon++) {
-      const a = at(lat, lon);
-      if (lon < LON) {
-        const b = at(lat, lon + 1);
-        segs.push([a, b]);
-      }
-      if (lat < LAT) {
-        const c = at(lat + 1, lon);
-        segs.push([a, c]);
-      }
-    }
-  }
-  segs.sort((p, q) => (p[0][2] + p[1][2]) - (q[0][2] + q[1][2]));
-  for (const [a, b] of segs) {
-    const z = (a[2] + b[2]) / 2;
-    const alpha = 0.28 + 0.62 * (z + 1) / 2;
-    gctx.beginPath();
-    gctx.moveTo(a[0], a[1]);
-    gctx.lineTo(b[0], b[1]);
-    gctx.strokeStyle = ink(a[3], amp) + alpha.toFixed(3) + ")";
-    gctx.lineWidth = amp > 0.15 ? 1.15 : 0.9;
-    gctx.stroke();
-  }
-  if (amp > 0.05) {
-    gctx.beginPath();
-    gctx.ellipse(cx, cy, scale * 1.28, scale * 0.42, -0.5, 0, Math.PI * 2);
-    const ring = gctx.createLinearGradient(cx - scale, cy, cx + scale, cy);
-    ring.addColorStop(0, "rgba(80,210,255,.15)");
-    ring.addColorStop(0.45, "rgba(90,190,255,.85)");
-    ring.addColorStop(1, "rgba(230,70,220,.9)");
-    gctx.strokeStyle = ring;
-    gctx.lineWidth = 2.2;
-    gctx.shadowColor = "rgba(180,80,255,.8)";
-    gctx.shadowBlur = 14;
-    gctx.stroke();
-    gctx.shadowBlur = 0;
-  }
+  gctx.restore();
 }
 function globeFrame(now) {
-  const t = now / 1000;
-  const speaking = document.body.classList.contains("speaking");
-  voiceLevel = sampleVoice(speaking, t);
-  if (!reduceMotion) yaw += speaking ? 0.01 : 0.004;
+  const dt = lastFrame ? Math.min(0.05, (now - lastFrame) / 1000) : 0.016;
+  lastFrame = now;
+  const t = now / 1000, speakingNow = document.body.classList.contains("speaking");
+  talk += ((speakingNow ? 1 : 0) - talk) * Math.min(1, dt * 3.2);
+  voiceLevel = sampleVoice(speakingNow, t);
+  if (!reduceMotion) {
+    yaw += dt * (0.3 + 0.25 * talk);
+    phase += dt * (0.5 + talk * (0.9 + 2.2 * voiceLevel));
+    flick = 0.965 + 0.035 * Math.sin(t * 37) * Math.sin(t * 11.3);
+    if (talk > 0.5 && t - lastRipple > 0.5 - 0.25 * voiceLevel) { ripples.push(t); lastRipple = t; }
+    while (ripples.length && t - ripples[0] > 1.4) ripples.shift();
+  }
+  hudGain = 1 + 0.45 * talk * voiceLevel;
   drawGlobe(t);
+  applyBloom();
+  applyGlitch(t);
   requestAnimationFrame(globeFrame);
 }
 resizeGlobe();
 addEventListener("resize", resizeGlobe);
+if ("ResizeObserver" in window) new ResizeObserver(resizeGlobe).observe(globe);
 requestAnimationFrame(globeFrame);
 function setState(s, label) {
   document.body.classList.remove("thinking", "speaking", "listening");
@@ -259,7 +497,7 @@ function setState(s, label) {
 function animateBars() {}
 
 // ---------- painel de agentes e métricas ----------
-let AGENTS = [], upBase = 0, upAt = 0;
+let AGENTS = [];
 function renderAgents() {
   const g = $("#grid"); g.innerHTML = ""; let last = "";
   for (const a of AGENTS) {
@@ -279,13 +517,13 @@ async function loadPanel() {
     const p = await r.json();
     const ids = p.agents.map(a => a.id).join();
     if (ids !== AGENTS.map(a => a.id).join()) { AGENTS = p.agents; renderAgents(); }
-    $("#mTasks").textContent = p.stats.tarefas_hoje; $("#mMem").textContent = p.memoria.fatos + " fatos";
-    upBase = p.stats.uptime_s; upAt = Date.now();
   } catch {}
 }
-setInterval(() => { if (!upAt) return; const s = upBase + (Date.now() - upAt) / 1000;
-  $("#mUp").textContent = `${String(Math.floor(s / 3600)).padStart(2, "0")}:${String(Math.floor(s / 60) % 60).padStart(2, "0")}`; }, 1000);
 
+// #region agent log
+let dbgT0 = 0;
+function dbg(location, message, data, hypothesisId) { fetch('http://127.0.0.1:7758/ingest/8154ab9e-1423-43c1-8d13-6e63b8bef731',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'f7a251'},body:JSON.stringify({sessionId:'f7a251',runId:'run1',hypothesisId,location,message,data:{...data,sinceSpeechMs:dbgT0?Math.round(performance.now()-dbgT0):null},timestamp:Date.now()})}).catch(()=>{}); }
+// #endregion
 // ---------- fala ----------
 let speaking = false, voice = null, convoUntil = 0;
 // voz neural do servidor (Antonio); se falhar, usa a voz do próprio celular
@@ -334,19 +572,31 @@ async function say(text) {
   ensureVoiceTap();
   try { audioCtx && audioCtx.resume(); } catch {}
   player.pause(); freeUrl(); stopListening(); speaking = true; setState("speaking", "falando"); animateBars(true);
+  // #region agent log
+  const dbgSay = performance.now(); dbg("index.html:say", "say start", { chars: t.length, serverVoice: !!TOKEN && Date.now() > serverVoiceOffUntil }, "B,E");
+  // #endregion
   if (TOKEN && Date.now() > serverVoiceOffUntil) {
     try {
       const r = await fetch(`/tts?token=${T()}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: t }) });
       if (!r.ok) throw new Error("tts " + r.status);
-      const blob = await r.blob();
+      const { id: job } = await r.json();
+      // #region agent log
+      dbg("index.html:say", "tts job ready", { ttsMs: Math.round(performance.now() - dbgSay), stale: id !== sayId, runId: "post-fix" }, "B");
+      // #endregion
       if (id !== sayId) return;                       // chegou outra fala no meio: descarta esta
-      playingUrl = URL.createObjectURL(blob);
-      player.onended = () => { if (id === sayId) { freeUrl(); doneSpeaking(); } };
-      player.onerror = () => { if (id === sayId) { freeUrl(); sayBrowser(t); } };
+      playingUrl = `/tts/${job}?token=${T()}`;          // o navegador toca enquanto o áudio ainda chega
+      player.onended = () => { if (id === sayId) { playingUrl = null; doneSpeaking(); } };
+      player.onerror = () => { if (id === sayId) { playingUrl = null; sayBrowser(t); } };
       player.src = playingUrl;
       await player.play();
+      // #region agent log
+      dbg("index.html:say", "audio playing", { sincesayMs: Math.round(performance.now() - dbgSay) }, "C");
+      // #endregion
       return;
     } catch (e) {
+      // #region agent log
+      dbg("index.html:say", "server voice failed", { err: String(e && (e.name + ": " + e.message)).slice(0, 120), afterMs: Math.round(performance.now() - dbgSay) }, "E");
+      // #endregion
       if (id !== sayId) return;
       player.onended = player.onerror = null;              // não deixa o player disparar a fala de reserva de novo
       if (!(e && e.name === "NotAllowedError")) serverVoiceOffUntil = Date.now() + 5 * 60 * 1000;  // servidor falhou: 5 min na voz do celular
@@ -381,17 +631,22 @@ function startListening() { if (!SR || speaking || !wantListen) return; try { re
 function stopListening() { if (rec) try { rec.abort(); } catch {} }
 if (SR) {
   rec = new SR(); rec.lang = "pt-BR"; rec.continuous = true; rec.interimResults = true;
-  rec.onstart = () => { $("#mVoice").textContent = "ouvindo";
-    if (!speaking && !document.body.classList.contains("thinking")) setState("listening", Date.now() < convoUntil ? "pode falar" : "diga “ei, Simba”"); };
+  rec.onstart = () => {
+    if (speaking || document.body.classList.contains("thinking")) return;
+    if (!online()) return setState(null, TOKEN ? "reconectando" : "sem código de acesso");
+    setState("listening", Date.now() < convoUntil ? "pode falar" : "diga “ei, Simba”"); };
   rec.onresult = e => {
     let interim = "", final = "";
     for (let i = e.resultIndex; i < e.results.length; i++) (e.results[i].isFinal ? (final += e.results[i][0].transcript) : (interim += e.results[i][0].transcript));
     if (interim) $("#heard").textContent = "› " + interim;     // mostra o que o microfone está ouvindo
+    // #region agent log
+    if (final) { dbgT0 = performance.now(); dbg("index.html:onresult", "final utterance", { chars: final.length }, "D"); }
+    // #endregion
     if (final) handleUtterance(final.trim());
   };
   rec.onerror = e => { if (e.error === "not-allowed" || e.error === "service-not-allowed") { wantListen = false; showWake(); } };
-  rec.onend = () => { $("#mVoice").textContent = speaking ? "falando" : "pausa"; if (!speaking && wantListen) setTimeout(startListening, 250); };
-} else { $("#mVoice").textContent = "texto"; }
+  rec.onend = () => { if (!speaking && wantListen) setTimeout(startListening, 250); };
+}
 
 function dispatch(cmd) {
   if (!cmd) return;
@@ -436,18 +691,42 @@ function answerApproval(ok) {
 }
 
 // ---------- conexão com o servidor ----------
-let ws, turnText = [];
+let ws, turnText = [], outbox = [];
 const shown = t => t.replace(/\*\*(.+?)\*\*/g, "$1").replace(/__(.+?)__/g, "$1").replace(/^#{1,6}\s*/gm, "");
 function showSaid(t) { const s = $("#said"); s.textContent = t; s.classList.toggle("long", t.length > 160); s.scrollTop = 0; }
-function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
-function sendMessage(text) { $("#heard").textContent = "› " + text; send({ type: "message", text }); setState("thinking", "processando"); }
+const online = () => ws && ws.readyState === 1;
+function send(o) { if (online()) ws.send(JSON.stringify(o)); else if (o.type === "message") outbox.push(o); }
+function sendMessage(text) {
+  // #region agent log
+  if (!dbgT0) dbgT0 = performance.now(); dbg("index.html:sendMessage", "message sent", { online: online(), chars: text.length }, "D");
+  // #endregion
+  $("#heard").textContent = "› " + text; send({ type: "message", text });
+  setState("thinking", online() ? "processando" : "sem conexão · envio ao reconectar");
+}
+function rejectToken() { store.del("st"); TOKEN = ""; outbox = []; showLogin(); setState(null, "código recusado"); }
 function connect() {
   if (!TOKEN) return showLogin();
-  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?token=${T()}&device=${DEVICE}`);
-  ws.onopen = loadPanel;
-  ws.onclose = e => { setState(null, "reconectando"); if (e.code === 4401) { store.del("st"); TOKEN = ""; return showLogin(); } setTimeout(connect, 2000); };
+  const sock = ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?token=${T()}&device=${DEVICE}`);
+  let opened = false;
+  sock.onopen = () => {
+    opened = true; loadPanel(); setState(null, "online");
+    for (const o of outbox.splice(0)) { sock.send(JSON.stringify(o)); setState("thinking", "processando"); }
+  };
+  sock.onclose = async e => {
+    if (sock !== ws) return;
+    setState(null, "reconectando");
+    if (e.code === 4401) return rejectToken();
+    // o servidor recusa o código antes de aceitar o WebSocket, então o navegador só vê 1006: confirma por HTTP
+    if (!opened) {
+      try { const r = await fetch(`/painel?token=${T()}`); if (r.status === 401) return rejectToken(); } catch {}
+    }
+    setTimeout(connect, 2000);
+  };
   ws.onmessage = e => {
     const ev = JSON.parse(e.data);
+    // #region agent log
+    if (["user", "tool", "text", "done", "error"].includes(ev.type)) dbg("index.html:ws", "ws " + ev.type, { name: ev.name, chars: (ev.text || "").length }, "A");
+    // #endregion
     switch (ev.type) {
       case "status": { const miss = Object.entries(ev.google || {}).filter(([, v]) => !v.ok).map(([c]) => c); setupNotice(miss); break; }
       case "user": turnText = []; if (ev.device !== DEVICE) $("#heard").textContent = `› (${ev.device}) ${ev.text.slice(0, 120)}`;
@@ -521,7 +800,7 @@ async function setupPush() {
 
 // ---------- início: tenta ativar tudo sozinho; se o navegador bloquear, pede um toque ----------
 connect(); if (TOKEN) loadPanel();
-if (googleMsg) $("#said").textContent = "Google: " + googleMsg;
+if (googleMsg) $("#heard").textContent = "Google: " + googleMsg;
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 if (TOKEN) {
   if (store.get("activated") && SR) { startListening(); navigator.wakeLock?.request("screen").catch(() => {}); setupPush().catch(() => {}); }
