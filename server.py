@@ -4,7 +4,7 @@ WebSocket /ws?token=...&device=pc|celular
   saída:   text | tool | done | approval | approval_closed | suggestion | activity | status | error
 HTTP: POST /upload?token= (imagem do celular, ex.: Atalho do iOS) | POST /push/subscribe | GET /push/key
       POST /tts?token= (voz neural: {text} -> MP3)"""
-import asyncio, json, os, secrets, time
+import asyncio, json, os, re, secrets, time
 from datetime import date
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -156,19 +156,37 @@ def memoria_zip(token: str = Query("")):
                     headers={"Content-Disposition": "attachment; filename=simba-memoria-obsidian.zip"})
 
 
+def speech_pieces(text: str, limit: int = 1800) -> list[str]:
+    """Parte o texto em falas que o edge-tts aceita, sem cortar o conteúdo."""
+    parts, buf = [], ""
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        while len(sentence) > limit:
+            parts.append(sentence[:limit].strip())
+            sentence = sentence[limit:].strip()
+        if buf and len(buf) + 1 + len(sentence) > limit:
+            parts.append(buf)
+            buf = sentence
+        else:
+            buf = f"{buf} {sentence}".strip() if buf else sentence
+    if buf:
+        parts.append(buf)
+    return [p for p in parts if p]
+
+
 @app.post("/tts")
 async def tts(body: dict = Body(...), token: str = Query("")):
     """Voz do SIMBA: devolve um MP3 com a voz neural. Se falhar, o app usa a voz do próprio celular."""
     check(token)
-    text = str(body.get("text", "")).strip()[:1500]
+    text = str(body.get("text", "")).strip()
     if not text:
         raise HTTPException(400, "texto vazio")
     audio = bytearray()
     try:
         import edge_tts
-        async for chunk in edge_tts.Communicate(text, VOICE, rate=VOICE_RATE, pitch=VOICE_PITCH).stream():
-            if chunk["type"] == "audio":
-                audio.extend(chunk["data"])
+        for piece in speech_pieces(text):
+            async for chunk in edge_tts.Communicate(piece, VOICE, rate=VOICE_RATE, pitch=VOICE_PITCH).stream():
+                if chunk["type"] == "audio":
+                    audio.extend(chunk["data"])
     except Exception as e:
         raise HTTPException(503, f"voz indisponível: {e}"[:200])
     if not audio:
