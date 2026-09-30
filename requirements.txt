@@ -1,0 +1,22 @@
+# Core server
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+python-dotenv>=1.0
+tzdata  # config.py uses ZoneInfo; slim image has no system tz database
+
+# Claude agents
+claude-agent-sdk>=0.1
+
+# Google integration (google.py)
+google-api-python-client>=2.100
+google-auth>=2.30
+google-auth-oauthlib>=1.2
+
+# Web push notifications (hub.py)
+py-vapid>=1.9
+pywebpush>=2.0
+cryptography>=42
+
+# Desktop-only extras (voice/screen) are intentionally NOT installed on the server:
+# mss, sounddevice, faster-whisper, edge-tts
