@@ -18,5 +18,8 @@ py-vapid>=1.9
 pywebpush>=2.0
 cryptography>=42
 
+# SIMBA's voice (pt-BR-AntonioNeural), served by POST /tts
+edge-tts>=7.0
+
 # Desktop-only extras (voice/screen) are intentionally NOT installed on the server:
-# mss, sounddevice, faster-whisper, edge-tts
+# mss, sounddevice, faster-whisper

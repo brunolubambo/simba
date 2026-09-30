@@ -2,7 +2,8 @@
 WebSocket /ws?token=...&device=pc|celular
   entrada: {type:message,text} | {type:approve,id,ok} | {type:accept,id} | {type:dismiss,id} | {type:reminder_snooze,id,min} | {type:observer,on}
   saída:   text | tool | done | approval | approval_closed | suggestion | activity | status | error
-HTTP: POST /upload?token= (imagem do celular, ex.: Atalho do iOS) | POST /push/subscribe | GET /push/key"""
+HTTP: POST /upload?token= (imagem do celular, ex.: Atalho do iOS) | POST /push/subscribe | GET /push/key
+      POST /tts?token= (voz neural: {text} -> MP3)"""
 import asyncio, json, os, secrets, time
 from datetime import date
 from contextlib import asynccontextmanager
@@ -20,6 +21,9 @@ from .agents import roster
 
 TOKEN = os.getenv("SIMBA_TOKEN", "")
 AUTO_ACT = os.getenv("SIMBA_AUTO", "true").lower() == "true"     # executa sugestões sem pedir clique
+VOICE = os.getenv("SIMBA_VOICE", "pt-BR-AntonioNeural")          # voz neural usada pelo app (edge-tts)
+VOICE_RATE = os.getenv("SIMBA_VOICE_RATE", "-4%")               # velocidade: ex. "+0%", "-10%"
+VOICE_PITCH = os.getenv("SIMBA_VOICE_PITCH", "-6Hz")            # tom: negativo = mais grave, ex. "-10Hz"
 STATS = {"start": time.time(), "day": date.today().isoformat(), "tasks": 0, "cost": 0.0}
 hub = Hub()
 state: dict = {}
@@ -150,6 +154,26 @@ def memoria_zip(token: str = Query("")):
     check(token)
     return Response(memory.export_zip(), media_type="application/zip",
                     headers={"Content-Disposition": "attachment; filename=simba-memoria-obsidian.zip"})
+
+
+@app.post("/tts")
+async def tts(body: dict = Body(...), token: str = Query("")):
+    """Voz do SIMBA: devolve um MP3 com a voz neural. Se falhar, o app usa a voz do próprio celular."""
+    check(token)
+    text = str(body.get("text", "")).strip()[:1500]
+    if not text:
+        raise HTTPException(400, "texto vazio")
+    audio = bytearray()
+    try:
+        import edge_tts
+        async for chunk in edge_tts.Communicate(text, VOICE, rate=VOICE_RATE, pitch=VOICE_PITCH).stream():
+            if chunk["type"] == "audio":
+                audio.extend(chunk["data"])
+    except Exception as e:
+        raise HTTPException(503, f"voz indisponível: {e}"[:200])
+    if not audio:
+        raise HTTPException(503, "voz indisponível")
+    return Response(bytes(audio), media_type="audio/mpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/health")
