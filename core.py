@@ -18,6 +18,18 @@ Approver = Callable[[str], Awaitable[bool]]
 AGENT_TOOLS = ("Task", "Agent")
 
 
+def _native_claude() -> str | None:
+    """No Windows o npm publica um claude.cmd, que o SDK recusa. O executável nativo fica ao lado."""
+    if os.name != "nt":
+        return None
+    roots = []
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        roots.append(os.path.join(appdata, "npm", "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe"))
+    roots.append(os.path.join(os.path.expanduser("~"), ".local", "bin", "claude.exe"))
+    return next((p for p in roots if os.path.isfile(p)), None)
+
+
 class Simba:
     def __init__(self, approve: Approver):
         self.approve = approve
@@ -34,8 +46,10 @@ class Simba:
             servers["vision"] = vision_server
         if browser.ENABLED:
             servers.update(browser.server_config())
+        cli = _native_claude()
         self.options = ClaudeAgentOptions(
             system_prompt=system, model=MODEL, cwd=str(WORKSPACE), agents=build_agents(), mcp_servers=servers,
+            cli_path=cli,
             can_use_tool=make_can_use_tool(self.approve), max_turns=MAX_TURNS, max_budget_usd=MAX_BUDGET_USD,
             permission_mode="default", resume=self.session_id)
         self.client = ClaudeSDKClient(options=self.options)
