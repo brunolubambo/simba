@@ -10,7 +10,11 @@ MEMORY = Path(os.getenv("SIMBA_MEMORY_DIR", DATA / "memory"))   # cofre do Obsid
 PROMPTS = Path(__file__).resolve().parent / "prompts"
 TEMPLATES = Path(__file__).resolve().parent / "templates"
 for p in (DATA, WORKSPACE, MEMORY, DATA / "google", DATA / "agents"):
-    p.mkdir(parents=True, exist_ok=True)
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"⚠️  Não consegui criar {p}: {e}")
+print(f"[simba] ROOT={ROOT} DATA={DATA} WORKSPACE={WORKSPACE}")
 
 MODEL = os.getenv("SIMBA_MODEL", "claude-sonnet-5-5")
 FAST_MODEL = os.getenv("OBSERVER_MODEL", "claude-haiku-4-5-20251001")

@@ -25,6 +25,7 @@ class Simba:
         self._build()
 
     def _build(self):
+        WORKSPACE.mkdir(parents=True, exist_ok=True)   # o SDK abre o subprocesso aqui: precisa existir
         system = (PROMPTS / "simba.md").read_text() + "\n\n# Memória\n" + load_context()
         servers = {"memory": memory_server, "google": google_server, "vida": life_server, "squad": squad_server}
         if os.getenv("OBSERVER_ENABLED", "true").lower() == "true":
