@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#01060d">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Rajdhani:wght@400;500;600&display=swap" rel="stylesheet">
+<title>SIMBA</title>
+<style>
+:root{
+  --bg:#01060d; --holo:#5ee7ff; --holo-2:#1fb6ff; --holo-dim:rgba(94,231,255,.35); --holo-faint:rgba(94,231,255,.12);
+  --text:#d8f6ff; --muted:#7fb3c7; --amber:#ffb547; --ok:#3dffa8; --bad:#ff5d6c;
+  --glow:0 0 6px rgba(94,231,255,.8),0 0 18px rgba(31,182,255,.45);
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--text);font:17px/1.45 Rajdhani,system-ui,sans-serif;overflow:hidden;
+  display:flex;flex-direction:column;height:100dvh;
+  background-image:radial-gradient(ellipse at 50% 30%,rgba(31,182,255,.16),transparent 60%),
+  linear-gradient(rgba(94,231,255,.05) 1px,transparent 1px),linear-gradient(90deg,rgba(94,231,255,.05) 1px,transparent 1px);
+  background-size:100% 100%,32px 32px,32px 32px}
+body::after{content:"";position:fixed;inset:0;pointer-events:none;
+  background:repeating-linear-gradient(0deg,rgba(0,0,0,.18) 0 1px,transparent 1px 3px)}
+.label{font-family:Orbitron,sans-serif;letter-spacing:.18em;text-transform:uppercase;font-size:10px;color:var(--muted)}
+
+#top{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:10px 12px 6px;padding-top:max(10px,env(safe-area-inset-top))}
+.metric{border:1px solid var(--holo-dim);background:rgba(4,20,32,.55);padding:6px 8px;clip-path:polygon(8px 0,100% 0,100% calc(100% - 8px),calc(100% - 8px) 100%,0 100%,0 8px)}
+.metric b{display:block;font-family:Orbitron,sans-serif;font-weight:500;font-size:14px;color:var(--holo);text-shadow:var(--glow);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+#stage{display:grid;place-items:center;padding-top:4px}
+#core{width:min(58vw,240px);aspect-ratio:1;filter:drop-shadow(0 0 10px rgba(31,182,255,.55))}
+#core .r{fill:none;stroke:var(--holo);transform-origin:50% 50%}
+#core .r1{stroke-width:1.2;stroke-dasharray:4 6;animation:spin 24s linear infinite}
+#core .r2{stroke-width:3;stroke-dasharray:60 20 10 20;opacity:.8;animation:spin 14s linear infinite reverse}
+#core .r3{stroke-width:1;stroke-dasharray:2 3;opacity:.6;animation:spin 40s linear infinite}
+#core .r4{stroke-width:6;stroke-dasharray:1 8;opacity:.5;animation:spin 9s linear infinite}
+#core .ticks{stroke:var(--holo);stroke-width:1;opacity:.5}
+#core .heart{fill:rgba(94,231,255,.18);stroke:var(--holo);stroke-width:2;transform-origin:50% 50%;animation:breathe 3.2s ease-in-out infinite}
+#core .bars rect{fill:var(--holo);transform-origin:center bottom;transform-box:fill-box;transform:scaleY(.15);transition:transform .08s}
+#core text{font-family:Orbitron,sans-serif;fill:var(--text);letter-spacing:.25em;text-anchor:middle}
+body.thinking #core .r2{animation-duration:2.5s}
+body.thinking #core .r4{animation-duration:1.6s;opacity:.9}
+body.speaking #core .heart{animation-duration:.7s;fill:rgba(94,231,255,.35)}
+body.listening #core .r1{stroke:var(--ok)}
+body.alert #core .r,body.alert #core .heart{stroke:var(--amber)}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes breathe{50%{transform:scale(1.08);opacity:.85}}
+@media (prefers-reduced-motion:reduce){#core *{animation:none!important}}
+#state{margin-top:-4px;text-align:center}
+#state .label{color:var(--holo)}
+
+#caption{min-height:52px;padding:6px 18px 4px;text-align:center}
+#heard{color:var(--muted);font-size:15px;min-height:20px}
+#said{font-size:18px;font-weight:500;text-shadow:0 0 8px rgba(94,231,255,.35);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+
+#alerts{padding:0 12px;display:flex;flex-direction:column;gap:6px}
+.alert{border:1px solid var(--amber);background:rgba(40,26,4,.75);padding:8px 10px;color:#ffe2b0;font-size:15px;
+  clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px)}
+.alert.info{border-color:var(--holo);background:rgba(4,26,40,.75);color:var(--text)}
+.alert .label{color:var(--amber);display:block;margin-bottom:2px}
+.alert.info .label{color:var(--holo)}
+.alert .body{white-space:pre-wrap;max-height:110px;overflow:auto}
+.alert .row{display:flex;gap:8px;margin-top:6px;flex-wrap:wrap}
+.alert button{font:600 14px Rajdhani,sans-serif;letter-spacing:.08em;background:transparent;border:1px solid currentColor;color:inherit;padding:6px 12px;min-height:36px}
+
+#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(86px,1fr));gap:6px;padding:8px 12px;overflow-y:auto;flex:1;align-content:start}
+.ag{border:1px solid var(--holo-faint);background:rgba(4,18,30,.5);padding:6px 5px 5px;text-align:center;transition:all .25s;
+  clip-path:polygon(6px 0,100% 0,100% calc(100% - 6px),calc(100% - 6px) 100%,0 100%,0 6px)}
+.ag .n{font-family:Orbitron,sans-serif;font-size:9px;letter-spacing:.06em;text-transform:uppercase;line-height:1.3;min-height:24px;display:grid;place-items:center}
+.ag .s{font-size:9px;letter-spacing:.14em;color:var(--ok);font-family:Orbitron,sans-serif;text-transform:uppercase}
+.ag .s::before{content:"";display:inline-block;width:5px;height:5px;border-radius:50%;background:currentColor;margin-right:4px;vertical-align:middle;box-shadow:0 0 6px currentColor}
+.ag.on{border-color:var(--holo);background:rgba(31,182,255,.18);box-shadow:inset 0 0 14px rgba(94,231,255,.4)}
+.ag.on .s{color:var(--amber)}
+.ag.custom{border-style:dashed}
+.sep{grid-column:1/-1;margin-top:4px}
+
+footer{display:flex;gap:8px;padding:8px 12px;padding-bottom:max(8px,env(safe-area-inset-bottom));border-top:1px solid var(--holo-faint);background:rgba(1,8,16,.85)}
+#input{flex:1;background:rgba(4,20,32,.7);border:1px solid var(--holo-dim);color:var(--text);font:17px Rajdhani,sans-serif;padding:10px 12px;outline:none}
+#input:focus{border-color:var(--holo);box-shadow:var(--glow)}
+#input::placeholder{color:var(--muted)}
+
+#wake{position:fixed;inset:0;display:none;place-items:center;background:rgba(1,6,13,.9);z-index:5;text-align:center;padding:24px}
+#wake.show{display:grid}
+#wake p{max-width:300px;color:var(--muted);margin:0 auto}
+#wake h2{font-family:Orbitron,sans-serif;letter-spacing:.3em;color:var(--holo);text-shadow:var(--glow);font-weight:500}
+#login{display:flex;flex-direction:column;gap:10px;width:min(320px,90vw)}
+#login input{background:rgba(4,20,32,.7);border:1px solid var(--holo-dim);color:var(--text);font:17px Rajdhani,sans-serif;padding:12px}
+#login button{font:600 14px Orbitron,sans-serif;letter-spacing:.2em;background:rgba(31,182,255,.15);border:1px solid var(--holo);color:var(--holo);padding:12px}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+:focus-visible{outline:2px solid var(--holo);outline-offset:2px}
+</style>
+</head>
+<body>
+<h1 class="sr">SIMBA, assistente pessoal</h1>
+<div id="top" aria-label="Métricas">
+  <div class="metric"><span class="label">Tarefas</span><b id="mTasks">0</b></div>
+  <div class="metric"><span class="label">Online</span><b id="mUp">--</b></div>
+  <div class="metric"><span class="label">Voz</span><b id="mVoice">--</b></div>
+  <div class="metric"><span class="label">Memória</span><b id="mMem">--</b></div>
+</div>
+
+<section id="stage" aria-hidden="true">
+  <svg id="core" viewBox="0 0 200 200">
+    <circle class="r r3" cx="100" cy="100" r="96"/>
+    <circle class="r r1" cx="100" cy="100" r="86"/>
+    <g class="ticks" id="ticks"></g>
+    <circle class="r r2" cx="100" cy="100" r="70"/>
+    <circle class="r r4" cx="100" cy="100" r="58"/>
+    <circle class="heart" cx="100" cy="100" r="40"/>
+    <g class="bars" id="bars"></g>
+    <text x="100" y="97" font-size="13">SIMBA</text>
+  </svg>
+</section>
+<div id="state"><span class="label" id="stateTxt">iniciando</span></div>
+
+<div id="caption" aria-live="polite">
+  <div id="heard"></div>
+  <div id="said"></div>
+</div>
+<div id="alerts" aria-live="assertive"></div>
+<div id="grid" aria-label="Agentes"></div>
+
+<footer>
+  <label class="sr" for="input">Digite quando não puder falar</label>
+  <input id="input" autocomplete="off" enterkeyhint="send" placeholder="Diga “Simba, …” ou digite aqui">
+</footer>
+
+<div id="wake" role="dialog" aria-modal="true" aria-labelledby="wakeTitle"><div id="wakeBody"></div></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const norm = s => s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim();
+const store = { get: k => { try { return localStorage.getItem(k) } catch { return null } },
+                set: (k, v) => { try { localStorage.setItem(k, v) } catch {} },
+                del: k => { try { localStorage.removeItem(k) } catch {} } };
+
+// ---------- token e parâmetros ----------
+const qs = new URLSearchParams(location.search);
+if (qs.get("token")) store.set("st", qs.get("token"));
+const googleMsg = qs.get("google");
+if (location.search) history.replaceState(null, "", location.pathname);
+let TOKEN = store.get("st") || "";
+const DEVICE = /Android|iPhone|iPad/i.test(navigator.userAgent) ? "celular" : "pc";
+const T = () => encodeURIComponent(TOKEN);
+
+// ---------- núcleo holográfico ----------
+(() => {
+  let t = "", b = "";
+  for (let i = 0; i < 60; i++) { const a = i * 6 * Math.PI / 180, r1 = 78, r2 = i % 5 ? 81 : 84;
+    t += `<line x1="${(100 + r1 * Math.cos(a)).toFixed(1)}" y1="${(100 + r1 * Math.sin(a)).toFixed(1)}" x2="${(100 + r2 * Math.cos(a)).toFixed(1)}" y2="${(100 + r2 * Math.sin(a)).toFixed(1)}"/>`; }
+  for (let i = 0; i < 9; i++) b += `<rect x="${78 + i * 5}" y="104" width="3" height="18" rx="1"/>`;
+  $("#ticks").innerHTML = t; $("#bars").innerHTML = b;
+})();
+function setState(s, label) {
+  document.body.classList.remove("thinking", "speaking", "listening");
+  if (s) document.body.classList.add(s);
+  $("#stateTxt").textContent = label || "online";
+}
+let barTimer;
+function animateBars(on) {
+  clearInterval(barTimer);
+  const bars = [...document.querySelectorAll("#bars rect")];
+  if (!on) { bars.forEach(r => r.style.transform = "scaleY(.15)"); return; }
+  barTimer = setInterval(() => bars.forEach(r => r.style.transform = `scaleY(${(.2 + Math.random() * .8).toFixed(2)})`), 110);
+}
+
+// ---------- painel de agentes e métricas ----------
+let AGENTS = [], upBase = 0, upAt = 0;
+function renderAgents() {
+  const g = $("#grid"); g.innerHTML = ""; let last = "";
+  for (const a of AGENTS) {
+    if (a.grupo !== last) { last = a.grupo; const s = document.createElement("div"); s.className = "label sep"; s.textContent = a.grupo; g.append(s); }
+    const d = document.createElement("div"); d.className = "ag" + (a.grupo === "Criados por você" ? " custom" : ""); d.id = "ag-" + a.id; d.title = a.descricao;
+    d.innerHTML = `<div class="n"></div><div class="s">online</div>`; d.querySelector(".n").textContent = a.nome; g.append(d);
+  }
+}
+function agentState(id, working, task) {
+  const d = document.getElementById("ag-" + id); if (!d) return;
+  d.classList.toggle("on", working); d.querySelector(".s").textContent = working ? "ativo" : "online";
+  if (working) { d.scrollIntoView({ block: "nearest", behavior: "smooth" }); if (task) d.title = task; }
+}
+async function loadPanel() {
+  try {
+    const r = await fetch(`/painel?token=${T()}`); if (!r.ok) return;
+    const p = await r.json();
+    const ids = p.agents.map(a => a.id).join();
+    if (ids !== AGENTS.map(a => a.id).join()) { AGENTS = p.agents; renderAgents(); }
+    $("#mTasks").textContent = p.stats.tarefas_hoje; $("#mMem").textContent = p.memoria.fatos + " fatos";
+    upBase = p.stats.uptime_s; upAt = Date.now();
+  } catch {}
+}
+setInterval(() => { if (!upAt) return; const s = upBase + (Date.now() - upAt) / 1000;
+  $("#mUp").textContent = `${String(Math.floor(s / 3600)).padStart(2, "0")}:${String(Math.floor(s / 60) % 60).padStart(2, "0")}`; }, 1000);
+
+// ---------- fala ----------
+let speaking = false, voice = null, convoUntil = 0;
+function pickVoice() {
+  const vs = speechSynthesis.getVoices().filter(v => v.lang.toLowerCase().startsWith("pt"));
+  voice = vs.find(v => /br/i.test(v.lang) && /(daniel|antonio|felipe|male)/i.test(v.name)) || vs.find(v => /br/i.test(v.lang)) || vs[0] || null;
+}
+if ("speechSynthesis" in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
+function spoken(t) {
+  t = t.replace(/```[\s\S]*?```/g, " O código está na tela. ").replace(/https?:\/\/\S+/g, "link na tela").replace(/[*_#>`|]/g, "").replace(/\s+/g, " ").trim();
+  const parts = t.match(/[^.!?]+[.!?]*/g) || [t];
+  return (parts.length > 3 || t.length > 380) ? parts.slice(0, 2).join(" ") + " Os detalhes estão na tela." : t;
+}
+function say(text) {
+  if (!("speechSynthesis" in window) || !text) return;
+  speechSynthesis.cancel(); stopListening(); speaking = true; setState("speaking", "falando"); animateBars(true);
+  const u = new SpeechSynthesisUtterance(spoken(text)); u.lang = "pt-BR"; if (voice) u.voice = voice; u.rate = 1.05;
+  u.onend = u.onerror = () => { speaking = false; animateBars(false); convoUntil = Date.now() + 15000; setState(null, "online"); startListening(); };
+  speechSynthesis.speak(u);
+}
+
+// ---------- escuta contínua: "Simba, ..." ----------
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null, wantListen = true, pendingApproval = null;
+const YES = /^(sim|pode|autorizo|confirmo|confirma|manda|envia|ok|claro|isso|positivo|faca|faz|segue)\b/;
+const NO = /^(nao|cancela|negado|nega|para|pare|espera|negativo)\b/;
+function startListening() { if (!SR || speaking || !wantListen) return; try { rec.start(); } catch {} }
+function stopListening() { if (rec) try { rec.abort(); } catch {} }
+if (SR) {
+  rec = new SR(); rec.lang = "pt-BR"; rec.continuous = true; rec.interimResults = true;
+  rec.onstart = () => { $("#mVoice").textContent = "ouvindo";
+    if (!speaking && !document.body.classList.contains("thinking")) setState("listening", Date.now() < convoUntil ? "pode falar" : "diga “Simba”"); };
+  rec.onresult = e => {
+    let interim = "", final = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) (e.results[i].isFinal ? (final += e.results[i][0].transcript) : (interim += e.results[i][0].transcript));
+    if (interim && (pendingApproval || Date.now() < convoUntil || /simba/i.test(interim))) $("#heard").textContent = "› " + interim;
+    if (final) handleUtterance(final.trim());
+  };
+  rec.onerror = e => { if (e.error === "not-allowed" || e.error === "service-not-allowed") { wantListen = false; showWake(); } };
+  rec.onend = () => { $("#mVoice").textContent = speaking ? "falando" : "pausa"; if (!speaking && wantListen) setTimeout(startListening, 250); };
+} else { $("#mVoice").textContent = "texto"; }
+
+function handleUtterance(t) {
+  const n = norm(t);
+  if (pendingApproval) {
+    const tail = n.replace(/^.*?\bsimba\b[\s,.!?:-]*/, "");
+    if (YES.test(tail)) return answerApproval(true);
+    if (NO.test(tail)) return answerApproval(false);
+  }
+  const woke = /\bsimba\b/.test(n);
+  if (!woke && Date.now() > convoUntil) return;
+  const cmd = woke ? t.replace(/^.*?\bsimba\b[\s,.!?:-]*/i, "").trim() : t;
+  if (!cmd) { $("#heard").textContent = "› Simba"; return say("Pois não, senhor?"); }
+  if (/^(obrigad|valeu|era isso|so isso|pode parar|dispensado)/.test(norm(cmd))) { convoUntil = 0; return say("Às ordens."); }
+  sendMessage(cmd);
+}
+
+// ---------- autorizações e avisos ----------
+function alertBox(kind, id, label, text, approval) {
+  const d = document.createElement("div"); d.className = "alert " + kind; d.id = "al-" + id;
+  d.innerHTML = `<span class="label"></span><div class="body"></div>` + (approval ? `<div class="row"><button>SIM</button><button>NÃO</button></div>` : "");
+  d.querySelector(".label").textContent = label; d.querySelector(".body").textContent = text;
+  if (approval) { const [y, n] = d.querySelectorAll("button"); y.onclick = () => answerApproval(true); n.onclick = () => answerApproval(false); }
+  $("#alerts").prepend(d);
+  if (!approval) setTimeout(() => d.remove(), 12000);
+  if (navigator.vibrate) navigator.vibrate(kind === "info" ? 40 : [60, 60, 60]);
+}
+function answerApproval(ok) {
+  if (!pendingApproval) return;
+  send({ type: "approve", id: pendingApproval, ok });
+  document.getElementById("al-" + pendingApproval)?.remove();
+  pendingApproval = null; document.body.classList.remove("alert");
+  say(ok ? "Autorizado." : "Cancelado.");
+}
+
+// ---------- conexão com o servidor ----------
+let ws, lastSaid = "";
+function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+function sendMessage(text) { $("#heard").textContent = "› " + text; send({ type: "message", text }); setState("thinking", "processando"); }
+function connect() {
+  if (!TOKEN) return showLogin();
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?token=${T()}&device=${DEVICE}`);
+  ws.onopen = loadPanel;
+  ws.onclose = e => { setState(null, "reconectando"); if (e.code === 4401) { store.del("st"); TOKEN = ""; return showLogin(); } setTimeout(connect, 2000); };
+  ws.onmessage = e => {
+    const ev = JSON.parse(e.data);
+    switch (ev.type) {
+      case "status": { const miss = Object.entries(ev.google || {}).filter(([, v]) => !v.ok).map(([c]) => c); setupNotice(miss); break; }
+      case "user": if (ev.device !== DEVICE) $("#heard").textContent = `› (${ev.device}) ${ev.text.slice(0, 120)}`;
+        setState("thinking", ev.device === "proativo" ? "agindo por conta própria" : ev.device === "rotina" ? "rotina" : "processando"); break;
+      case "agent": agentState(ev.id, ev.state === "working", ev.task); break;
+      case "tool": $("#stateTxt").textContent = ev.name.replace(/_/g, " "); break;
+      case "text": lastSaid = ev.text; $("#said").textContent = ev.text; break;
+      case "done": setState(null, "online"); document.querySelectorAll(".ag.on").forEach(d => agentState(d.id.slice(3), false));
+        if (lastSaid) say(lastSaid); lastSaid = ""; loadPanel(); break;
+      case "approval": pendingApproval = ev.id; document.body.classList.add("alert");
+        alertBox("", ev.id, "Autorização · diga sim ou não", ev.prompt, true);
+        say("Senhor, preciso da sua autorização. " + ev.prompt.split("\n")[0] + ". Posso seguir?"); break;
+      case "approval_closed": document.getElementById("al-" + ev.id)?.remove();
+        if (pendingApproval === ev.id) { pendingApproval = null; document.body.classList.remove("alert"); } break;
+      case "suggestion": alertBox("info", ev.id, ev.auto ? "Iniciativa" : "Sugestão", `${ev.titulo}. ${ev.motivo || ""}`, false);
+        say(`Senhor, ${ev.titulo}. ${ev.auto ? "Já estou cuidando disso." : ""}`); break;
+      case "reminder": alertBox("info", "r" + ev.id + "-" + Date.now(), "Lembrete", ev.motivo, false); say("Lembrete: " + ev.motivo); break;
+      case "error": setState(null, "falha: " + ev.text.slice(0, 50)); break;
+    }
+  };
+}
+
+// ---------- texto (reserva) ----------
+$("#input").addEventListener("keydown", e => {
+  if (e.key === "Enter" && e.target.value.trim()) { sendMessage(e.target.value.trim()); convoUntil = Date.now() + 15000; e.target.value = ""; }
+});
+
+// ---------- ativação (só quando o navegador exige um toque) ----------
+function showWake() {
+  $("#wakeBody").innerHTML = `<h2 id="wakeTitle">SIMBA</h2><p>Toque em qualquer lugar para ativar a voz.</p>`;
+  $("#wake").classList.add("show"); $("#wake").onclick = activate;
+}
+async function activate() {
+  $("#wake").classList.remove("show"); $("#wake").onclick = null; wantListen = true;
+  try { const s = await navigator.mediaDevices.getUserMedia({ audio: true }); s.getTracks().forEach(t => t.stop()); } catch {}
+  try { await setupPush(); } catch {}
+  try { await navigator.wakeLock?.request("screen"); } catch {}
+  store.set("activated", "1"); startListening();
+  say("Sistemas online. Às suas ordens, senhor.");
+}
+function showLogin() {
+  $("#wakeBody").innerHTML = `<form id="login"><h2 id="wakeTitle">SIMBA</h2><label for="tk" class="label">Código de acesso</label><input id="tk" type="password" autocomplete="current-password" required><button>ATIVAR</button></form>`;
+  $("#wake").classList.add("show"); $("#wake").onclick = null;
+  $("#login").onsubmit = e => { e.preventDefault(); TOKEN = $("#tk").value.trim(); store.set("st", TOKEN); connect(); activate(); };
+}
+function setupNotice(miss) {
+  document.getElementById("al-google")?.remove();
+  if (!miss.length) return;
+  const d = document.createElement("div"); d.className = "alert info"; d.id = "al-google";
+  d.innerHTML = `<span class="label">Configuração única</span><div class="body">Conecte as contas Google (só uma vez):</div><div class="row"></div>`;
+  for (const c of miss) { const b = document.createElement("button"); b.textContent = c.toUpperCase();
+    b.onclick = () => location.href = `/google/connect?conta=${c}&token=${T()}`; d.querySelector(".row").append(b); }
+  $("#alerts").append(d);
+}
+
+// ---------- notificações push ----------
+async function setupPush() {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window) || !TOKEN) return;
+  const reg = await navigator.serviceWorker.register("sw.js");
+  if (Notification.permission === "default") await Notification.requestPermission();
+  if (Notification.permission !== "granted") return;
+  const { key } = await (await fetch(`/push/key?token=${T()}`)).json();
+  const raw = atob((key + "=".repeat((4 - key.length % 4) % 4)).replace(/-/g, "+").replace(/_/g, "/"));
+  const sub = (await reg.pushManager.getSubscription()) ||
+    await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: Uint8Array.from(raw, c => c.charCodeAt(0)) });
+  await fetch(`/push/subscribe?token=${T()}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(sub) });
+}
+
+// ---------- início: tenta ativar tudo sozinho; se o navegador bloquear, pede um toque ----------
+connect(); if (TOKEN) loadPanel();
+if (googleMsg) $("#said").textContent = "Google: " + googleMsg;
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+if (TOKEN) {
+  if (store.get("activated") && SR) { startListening(); navigator.wakeLock?.request("screen").catch(() => {}); setupPush().catch(() => {}); }
+  else showWake();
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") { navigator.wakeLock?.request("screen").catch(() => {}); startListening(); loadPanel(); }
+});
+</script>
+</body>
+</html>
