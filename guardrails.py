@@ -1,11 +1,11 @@
 """Níveis de autonomia aplicados a cada chamada de ferramenta.
 Livre: ler, buscar, rascunhar, registrar dados locais, navegar/ler sites.
-Pede aprovação: enviar e-mail, remover evento, evento com convidados, clicar/digitar em sites,
+Pede aprovação: enviar e-mail (exceto para as contas do próprio usuário), remover evento, evento com convidados, clicar/digitar em sites,
 comandos sensíveis, escrita fora do workspace. Bloqueado: comandos destrutivos."""
 import re
 from pathlib import Path
 from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
-from .config import WORKSPACE
+from .config import WORKSPACE, ACCOUNTS
 from . import browser
 
 FREE = {"Read", "Glob", "Grep", "WebSearch", "WebFetch", "TodoWrite", "Task", "Agent",
@@ -18,6 +18,17 @@ FREE_PREFIX = ("mcp__vida__",)   # dados locais, reversíveis
 BLOCKED_BASH = [r"\brm\s+-rf?\s+(/|~|\$HOME)", r"\bsudo\b", r"\bmkfs\b", r"\bdd\s+if=",
                 r":\(\)\s*\{", r"\bchmod\s+-R\s+777\s+/", r"curl[^|]*\|\s*(ba)?sh"]
 ALWAYS_ASK_BASH = [r"\bvercel\b.*--prod", r"\bgit\s+push\b", r"\bnpm\s+publish\b", r"\brm\b"]
+
+
+EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+
+def _only_own(para: str) -> bool:
+    """Todos os destinatários são contas do próprio usuário (GOOGLE_PESSOAL / GOOGLE_PROFISSIONAL)?
+    Qualquer coisa estranha no campo (ex.: um @ que não é endereço reconhecido) volta a pedir aprovação."""
+    own = {e.strip().lower() for e in ACCOUNTS.values() if e and e.strip()}
+    found = [e.lower() for e in EMAIL.findall(para or "")]
+    return bool(found) and all(e in own for e in found) and "@" not in EMAIL.sub("", para or "")
 
 
 def _inside_workspace(p: str) -> bool:
@@ -33,6 +44,8 @@ def describe(tool: str, i: dict) -> str | None:
     if tool in FREE or tool.startswith(FREE_PREFIX):
         return None
     if tool == "mcp__google__gmail_enviar":
+        if not i.get("responder_a") and _only_own(i.get("para", "")):
+            return None                     # para as suas próprias contas (ex.: lista de vagas): sai sem perguntar
         para = i.get("para") or ("resposta ao e-mail " + i.get("responder_a", ""))
         return f"Enviar e-mail pela conta {i.get('conta')} para {para}\nAssunto: {i.get('assunto', '(mesmo do original)')}\n\n{i.get('corpo', '')[:600]}"
     if tool == "mcp__google__agenda_criar":

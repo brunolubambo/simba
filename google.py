@@ -132,7 +132,7 @@ def gmail_rascunho(a):
     return f"Rascunho criado na conta {a['conta']} (id {d['id']}). Aparece em Rascunhos no Gmail."
 
 
-@tool("gmail_enviar", "ENVIA um e-mail (sempre pede aprovação do usuário).",
+@tool("gmail_enviar", "ENVIA um e-mail. Para as contas do próprio usuário sai direto; para outras pessoas pede aprovação.",
       schema({"conta": CONTA, "corpo": ("string", "texto do e-mail")},
              {"para": ("string", "destinatário"), "assunto": ("string", "assunto"),
               "responder_a": ("string", "id do e-mail a responder")}))
