@@ -63,31 +63,14 @@ class Simba:
 
     async def ask(self, text: str) -> AsyncIterator[dict]:
         """Eventos: text | tool | agent (working/idle) | done."""
-        # region agent log
-        import time as _t, json as _j
-        _t0 = _t.perf_counter(); _seen: set = set()
-        def _dbg(m, **d):
-            open(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cursor", "debug-f7a251.log"), "a", encoding="utf-8").write(_j.dumps({"sessionId": "f7a251", "runId": "run1", "hypothesisId": "A", "location": "core.py:ask", "message": m, "data": {**d, "ms": round((_t.perf_counter() - _t0) * 1000)}, "timestamp": int(_t.time() * 1000)}) + "\n")
-        # endregion
         async with self._lock:
             if CHANGED["flag"]:
                 await self.reload()
-            # region agent log
-            _was = self._connected
-            # endregion
             await self.start()
-            # region agent log
-            _dbg("client ready", wasConnected=_was, model=MODEL)
-            # endregion
             ctx = f"[agora: {now_label()} | contas Google conectadas: {authorized() or 'nenhuma'}]\n"
             await self.client.query(ctx + text)
             working: dict[str, str] = {}
             async for msg in self.client.receive_response():
-                # region agent log
-                _k = type(msg).__name__
-                if _k not in _seen or _k == "ResultMessage":
-                    _seen.add(_k); _dbg("first " + _k, apiMs=getattr(msg, "duration_api_ms", None), turns=getattr(msg, "num_turns", None), blocks=[type(b).__name__ for b in getattr(msg, "content", [])] if isinstance(getattr(msg, "content", None), list) else None)
-                # endregion
                 if isinstance(msg, AssistantMessage):
                     for b in msg.content:
                         if isinstance(b, TextBlock) and not getattr(msg, "parent_tool_use_id", None):
