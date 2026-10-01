@@ -31,6 +31,7 @@ body::after{content:"";position:fixed;inset:0;pointer-events:none;
 #core{position:absolute;inset:0;width:100%;height:100%;display:block}
 #state{position:absolute;left:0;right:0;bottom:10px;text-align:center}
 #state .label{color:var(--holo)}
+body.interview #state .label{color:var(--amber)}
 
 #caption{padding:4px 18px 2px;text-align:center}
 #heard{color:var(--muted);font-size:15px;min-height:20px}
@@ -480,10 +481,16 @@ resizeGlobe();
 addEventListener("resize", resizeGlobe);
 if ("ResizeObserver" in window) new ResizeObserver(resizeGlobe).observe(globe);
 requestAnimationFrame(globeFrame);
+let interviewMode = false;
 function setState(s, label) {
   document.body.classList.remove("thinking", "speaking", "listening");
   if (s) document.body.classList.add(s);
-  $("#stateTxt").textContent = label || "online";
+  let text = label || "online";
+  if (interviewMode) {
+    if (!text || text === "online" || text === "entrevista" || text === "entrevista · voz pt") text = voiceEn ? "entrevista" : "entrevista · voz pt";
+    else if (!String(text).startsWith("entrevista")) text = "entrevista · " + text;
+  }
+  $("#stateTxt").textContent = text;
 }
 function animateBars() {}
 
@@ -512,7 +519,7 @@ async function loadPanel() {
 }
 
 // ---------- fala ----------
-let speaking = false, voice = null, convoUntil = 0;
+let speaking = false, voice = null, voiceEn = null, convoUntil = 0;
 // voz neural do servidor (Antonio); se falhar, usa a voz do próprio celular
 const player = new Audio(); let sayId = 0, playingUrl = null, serverVoiceOffUntil = 0;
 function unlockAudio() {  // iOS só toca áudio depois de um toque: toca um silêncio para liberar o player
@@ -524,10 +531,27 @@ function unlockAudio() {  // iOS só toca áudio depois de um toque: toca um sil
 }
 document.addEventListener("pointerdown", unlockAudio, { once: true });
 function pickVoice() {
-  const vs = speechSynthesis.getVoices().filter(v => v.lang.toLowerCase().startsWith("pt"));
+  const all = speechSynthesis.getVoices();
+  const vs = all.filter(v => v.lang.toLowerCase().startsWith("pt"));
   voice = vs.find(v => /br/i.test(v.lang) && /(daniel|antonio|felipe|male)/i.test(v.name)) || vs.find(v => /br/i.test(v.lang)) || vs[0] || null;
+  const en = all.filter(v => v.lang.toLowerCase().startsWith("en"));
+  voiceEn = en.find(v => /^en-us/i.test(v.lang) && /(daniel|aaron|alex|david|google)/i.test(v.name))
+    || en.find(v => /^en-us/i.test(v.lang))
+    || en[0] || null;
 }
-if ("speechSynthesis" in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
+function setInterview(on) {
+  const next = !!on;
+  if (next === interviewMode) return;
+  interviewMode = next;
+  document.body.classList.toggle("interview", interviewMode);
+  if (rec) rec.lang = interviewMode ? "en-US" : "pt-BR";
+  if (rec) { try { rec.abort(); } catch {} }
+  if (!speaking && !document.body.classList.contains("thinking")) setState(null, "online");
+}
+if ("speechSynthesis" in window) {
+  pickVoice();
+  speechSynthesis.onvoiceschanged = () => { pickVoice(); if (interviewMode && !speaking) setState(null, "online"); };
+}
 function spoken(t) {
   return t
     .replace(/```[a-zA-Z0-9_-]*\n?/g, " ")
@@ -552,7 +576,9 @@ function doneSpeaking() {
 function freeUrl() { if (playingUrl) { URL.revokeObjectURL(playingUrl); playingUrl = null; } }
 function sayBrowser(t, done) {
   if (!("speechSynthesis" in window)) return done();
-  const u = new SpeechSynthesisUtterance(t); u.lang = "pt-BR"; if (voice) u.voice = voice; u.rate = 1.05;
+  const u = new SpeechSynthesisUtterance(t);
+  if (interviewMode) { u.lang = "en-US"; if (voiceEn) u.voice = voiceEn; u.rate = 1; }
+  else { u.lang = "pt-BR"; if (voice) u.voice = voice; u.rate = 1.05; }
   u.onend = u.onerror = () => done();
   speechSynthesis.speak(u);
 }
@@ -634,12 +660,13 @@ async function pumpSay() {
   ensureVoiceTap();
   try { audioCtx && audioCtx.resume(); } catch {}
   try {
-    let ahead = sayQueue.length ? fetchClip(sayQueue[0], gen) : null;
+    const clipFor = (q) => (q.length && !interviewMode) ? fetchClip(q[0], gen) : null;
+    let ahead = clipFor(sayQueue);
     while (sayQueue.length && gen === sayGen) {
       const t = sayQueue.shift();
       const url = await ahead;
       if (gen !== sayGen) { if (url) URL.revokeObjectURL(url); break; }
-      ahead = sayQueue.length ? fetchClip(sayQueue[0], gen) : null;
+      ahead = clipFor(sayQueue);
       lastSaid = (lastSaid + " " + t).trim().slice(-500);
       await playClip(url, t, gen);
       if (url && url.startsWith("blob:") && playingUrl !== url) URL.revokeObjectURL(url);
@@ -721,7 +748,7 @@ if (SR) {
   rec.onstart = () => {
     if (speaking || document.body.classList.contains("thinking")) return;
     if (!online()) return setState(null, TOKEN ? "reconectando" : "sem código de acesso");
-    setState("listening", Date.now() < convoUntil ? "pode falar" : "diga “ei, Simba”"); };
+    setState("listening", interviewMode ? "entrevista" : (Date.now() < convoUntil ? "pode falar" : "diga “ei, Simba”")); };
   rec.onresult = e => {
     let interim = "", final = "";
     for (let i = e.resultIndex; i < e.results.length; i++) (e.results[i].isFinal ? (final += e.results[i][0].transcript) : (interim += e.results[i][0].transcript));
@@ -734,7 +761,7 @@ if (SR) {
 
 function dispatch(cmd) {
   if (!cmd) return;
-  if (/^(obrigad|valeu|era isso|so isso|pode parar|dispensado)/.test(norm(cmd))) { convoUntil = 0; return say("Às ordens."); }
+  if (!interviewMode && /^(obrigad|valeu|era isso|so isso|pode parar|dispensado)/.test(norm(cmd))) { convoUntil = 0; return say("Às ordens."); }
   sendMessage(cmd);
 }
 function handleUtterance(t) {
@@ -742,6 +769,13 @@ function handleUtterance(t) {
   if (n && n === lastHeard && Date.now() - lastHeardAt < 2000) return;
   lastHeard = n; lastHeardAt = Date.now();
   if (Date.now() < echoUntil && lastSaid && n.length > 10 && norm(lastSaid).includes(n)) return;
+  if (interviewMode) {
+    if (pendingApproval) {
+      if (YES.test(n)) return answerApproval(true);
+      if (NO.test(n)) return answerApproval(false);
+    }
+    return dispatch(t.trim());
+  }
   const rest = afterWake(t), woke = rest !== null;
   if (pendingApproval) {
     const tail = woke ? norm(rest) : n;
@@ -812,7 +846,10 @@ function connect() {
   ws.onmessage = e => {
     const ev = JSON.parse(e.data);
     switch (ev.type) {
-      case "status": { const miss = Object.entries(ev.google || {}).filter(([, v]) => !v.ok).map(([c]) => c); setupNotice(miss, ev.telegram); break; }
+      case "status": {
+        const miss = Object.entries(ev.google || {}).filter(([, v]) => !v.ok).map(([c]) => c); setupNotice(miss, ev.telegram);
+        if (typeof ev.interview === "boolean") setInterview(ev.interview); break; }
+      case "interview": setInterview(!!ev.on); break;
       case "user":
         turnOpen = true;
         if (ev.device !== DEVICE) { silenceNow(); voiced = ""; lastSaid = ""; }
@@ -820,7 +857,7 @@ function connect() {
         if (ev.device !== DEVICE) $("#heard").textContent = `› (${ev.device}) ${ev.text.slice(0, 120)}`;
         setState("thinking", ev.device === "proativo" ? "agindo por conta própria" : ev.device === "rotina" ? "rotina" : "processando"); break;
       case "agent": agentState(ev.id, ev.state === "working", ev.task); break;
-      case "tool": $("#stateTxt").textContent = ev.name.replace(/_/g, " "); break;
+      case "tool": $("#stateTxt").textContent = (interviewMode ? "entrevista · " : "") + ev.name.replace(/_/g, " "); break;
       case "text": absorbText(ev.text); showSaid(turnText.map(shown).join("\n\n")); if (turnOpen) speakNew(false); break;
       case "done": {
         turnOpen = false; speakNew(true); turnText = []; voiced = "";

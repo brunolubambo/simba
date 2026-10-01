@@ -1,10 +1,10 @@
 """Servidor central (roda no PC). PC e celular abrem o mesmo app web e compartilham o mesmo Simba.
 WebSocket /ws?token=...&device=pc|celular
   entrada: {type:message,text} | {type:approve,id,ok} | {type:accept,id} | {type:dismiss,id} | {type:reminder_snooze,id,min} | {type:observer,on}
-  saída:   text | tool | done | approval | approval_closed | suggestion | activity | status | error
+  saída:   text | tool | done | approval | approval_closed | suggestion | activity | status | error | interview
 HTTP: POST /upload?token= (imagem do celular, ex.: Atalho do iOS) | POST /push/subscribe | GET /push/key
       POST /tts?token= ({text} -> {id}) + GET /tts/{id}?token= (voz neural em MP3, transmitida) | POST /telegram/webhook (mensagens do bot, ver telegram.py)"""
-import asyncio, json, os, re, secrets, time
+import asyncio, json, os, re, secrets, time, unicodedata
 from datetime import date
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -12,7 +12,7 @@ load_dotenv()
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, HTTPException, Query, Body, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
-from .config import ROOT, WORKSPACE, ACCOUNTS, public_url
+from .config import ROOT, WORKSPACE, ACCOUNTS, PROMPTS, public_url
 from .core import Simba
 from .hub import Hub, save_sub, send_push, vapid, PUSH_TOO
 from .observer import Observer
@@ -34,16 +34,106 @@ def check(token: str):
         raise HTTPException(401, "token inválido")
 
 
+def _fold(text: str) -> str:
+    raw = unicodedata.normalize("NFD", text or "")
+    return "".join(c for c in raw if unicodedata.category(c) != "Mn").lower()
+
+
+_START = re.compile(r"\b(?:vamos\s+)?treinar\s+(?:uma\s+)?entrevista\b|\bmodo\s+entrevista\b|\binterview\s+practice\b")
+_END = re.compile(r"\bencerrar\s+(?:a\s+)?entrevista\b|\bend\s+the\s+interview\b|\bstop\s+the\s+interview\b|\bfinish\s+the\s+interview\b")
+_MARK = re.compile(r"\[\[entrevista:(on|off)\]\]", re.I)
+
+
+class InterviewStream:
+    """Tira [[entrevista:on|off]] do texto antes de exibir e falar. Segura um marcador cortado entre blocos."""
+
+    def __init__(self):
+        self.hold = ""
+
+    def feed(self, text: str) -> tuple[str, list[bool]]:
+        raw = self.hold + (text or "")
+        self.hold = ""
+        flips: list[bool] = []
+
+        def repl(m):
+            flips.append(m.group(1).lower() == "on")
+            return ""
+
+        clean = _MARK.sub(repl, raw)
+        cut = clean.rfind("[[")
+        if cut != -1 and "]]" not in clean[cut:]:
+            self.hold = clean[cut:]
+            clean = clean[:cut]
+        if flips:
+            clean = clean.lstrip("\n")
+        return clean, flips
+
+    def flush(self) -> str:
+        rest, self.hold = self.hold, ""
+        if "[[" in rest and "]]" not in rest:
+            return ""
+        return rest
+
+
+def interview_prompt(text: str, origin: str) -> tuple[str, bool]:
+    """Devolve o texto para o modelo e se este turno encerra a entrevista."""
+    if origin in ("rotina", "proativo"):
+        return text, False
+    folded = _fold(text)
+    active = bool(state.get("interview"))
+    ending = active and bool(_END.search(folded))
+    if ending:
+        phase = "encerrar"
+    elif active:
+        phase = "em curso"
+    elif _START.search(folded):
+        phase = "abrir"
+    else:
+        return text, False
+    rules = (PROMPTS / "entrevistador.md").read_text(encoding="utf-8")
+    wrapped = (
+        "[modo entrevista]\n"
+        f"Fase: {phase}.\n"
+        "Conduza você mesmo. Não delegue a nenhum agente, inclusive entrevistador.\n\n"
+        + rules
+        + "\n\nMensagem do Bruno:\n"
+        + text
+    )
+    return wrapped, ending
+
+
+async def set_interview(on: bool):
+    if bool(state.get("interview")) == on:
+        return
+    state["interview"] = on
+    await hub.broadcast({"type": "interview", "on": on})
+
+
 async def run_and_broadcast(text: str, origin: str):
     await hub.broadcast({"type": "user", "text": text, "device": origin})
+    ask_text, ending = interview_prompt(text, origin)
+    if ending:
+        await set_interview(False)
+    gate = InterviewStream()
     final: list[str] = []                    # texto depois da última ferramenta = a resposta final
     try:
-        async for ev in state["simba"].ask(text):
-            await hub.broadcast(ev)
+        async for ev in state["simba"].ask(ask_text):
             kind = ev.get("type")
             if kind == "text":
-                final.append(ev["text"])
-            elif kind == "tool" or (kind == "agent" and ev.get("state") == "working"):
+                clean, flips = gate.feed(ev.get("text") or "")
+                for on in flips:
+                    await set_interview(on)
+                if clean.strip():
+                    await hub.broadcast({"type": "text", "text": clean})
+                    final.append(clean)
+                continue
+            if kind == "done":
+                tail = gate.flush()
+                if tail.strip():
+                    await hub.broadcast({"type": "text", "text": tail})
+                    final.append(tail)
+            await hub.broadcast(ev)
+            if kind == "tool" or (kind == "agent" and ev.get("state") == "working"):
                 final = []
             elif kind == "done":
                 if STATS["day"] != date.today().isoformat():
@@ -69,11 +159,13 @@ def status() -> dict:
     return {"type": "status", "devices": hub.devices(), "observer": state["observer"].enabled,
             "observer_available": state["observer"].available,
             "google": {c: {"email": e, "ok": c in ok} for c, e in ACCOUNTS.items()},
-            "telegram": telegram.snapshot()}
+            "telegram": telegram.snapshot(),
+            "interview": bool(state.get("interview"))}
 
 
 @asynccontextmanager
 async def lifespan(app):
+    state["interview"] = False
     state["simba"] = Simba(hub.approve)
     if AUTO_ACT:
         async def act(s):
