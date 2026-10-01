@@ -555,8 +555,22 @@ function sayBrowser(t, done) {
   const u = new SpeechSynthesisUtterance(t); u.lang = "pt-BR"; if (voice) u.voice = voice; u.rate = 1.05;
   u.onend = u.onerror = () => done();
   speechSynthesis.speak(u);
+  perfPlayedAudio();
 }
 let sayQueue = [], sayBusy = false, sayGen = 0, playFinish = null, voiced = "", turnOpen = false, playingText = "";
+let perfTextAt = 0, perfQueued = false, perfPlayed = false;
+function perfReset() { perfTextAt = 0; perfQueued = false; perfPlayed = false; }
+function perfSawText() { if (!perfTextAt) perfTextAt = performance.now(); }
+function perfQueuedAudio() {
+  if (!perfTextAt || perfQueued) return;
+  perfQueued = true;
+  console.info(`[perf] texto->fila ${Math.round(performance.now() - perfTextAt)}ms`);
+}
+function perfPlayedAudio() {
+  if (!perfTextAt || perfPlayed) return;
+  perfPlayed = true;
+  console.info(`[perf] texto->áudio ${Math.round(performance.now() - perfTextAt)}ms`);
+}
 let lastSaid = "", echoUntil = 0, lastHeard = "", lastHeardAt = 0;
 function silenceNow() {
   sayGen++; sayQueue = [];
@@ -572,6 +586,7 @@ function say(text) {
   const t = spoken(text);
   if (!t || t === playingText || t === sayQueue[sayQueue.length - 1]) return;
   sayQueue.push(t);
+  perfQueuedAudio();
   pumpSay();
 }
 async function fetchClip(text, gen) {
@@ -619,7 +634,7 @@ function playClip(url, text, gen) {
     };
     playingUrl = url;
     player.src = url;
-    player.play().then(() => { heard = true; }).catch(e => {
+    player.play().then(() => { heard = true; perfPlayedAudio(); }).catch(e => {
       if (gen !== sayGen || heard || browser) return;
       if (!(e && e.name === "NotAllowedError")) serverVoiceOffUntil = Date.now() + 5 * 60 * 1000;
       fallback();
@@ -785,7 +800,7 @@ function showSaid(t) { const s = $("#said"); s.textContent = t; s.classList.togg
 const online = () => ws && ws.readyState === 1;
 function send(o) { if (online()) ws.send(JSON.stringify(o)); else if (o.type === "message") outbox.push(o); }
 function sendMessage(text) {
-  silenceNow(); turnOpen = true; voiced = ""; turnText = []; lastSaid = "";
+  silenceNow(); perfReset(); turnOpen = true; voiced = ""; turnText = []; lastSaid = "";
   $("#heard").textContent = "› " + text; send({ type: "message", text });
   setState("thinking", online() ? "processando" : "sem conexão · envio ao reconectar");
 }
@@ -814,14 +829,14 @@ function connect() {
     switch (ev.type) {
       case "status": { const miss = Object.entries(ev.google || {}).filter(([, v]) => !v.ok).map(([c]) => c); setupNotice(miss, ev.telegram); break; }
       case "user":
-        turnOpen = true;
+        perfReset(); turnOpen = true;
         if (ev.device !== DEVICE) { silenceNow(); voiced = ""; lastSaid = ""; }
         turnText = [];
         if (ev.device !== DEVICE) $("#heard").textContent = `› (${ev.device}) ${ev.text.slice(0, 120)}`;
         setState("thinking", ev.device === "proativo" ? "agindo por conta própria" : ev.device === "rotina" ? "rotina" : "processando"); break;
       case "agent": agentState(ev.id, ev.state === "working", ev.task); break;
       case "tool": $("#stateTxt").textContent = ev.name.replace(/_/g, " "); break;
-      case "text": absorbText(ev.text); showSaid(turnText.map(shown).join("\n\n")); if (turnOpen) speakNew(false); break;
+      case "text": perfSawText(); absorbText(ev.text); showSaid(turnText.map(shown).join("\n\n")); if (turnOpen) speakNew(false); break;
       case "done": {
         turnOpen = false; speakNew(true); turnText = []; voiced = "";
         document.querySelectorAll(".ag.on").forEach(d => agentState(d.id.slice(3), false));
