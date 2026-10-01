@@ -332,8 +332,7 @@ function resize() {
   composer.setSize(w, h);
   bloom.setSize(bw, bh);
   const visH = 2 * Math.tan(THREE.MathUtils.degToRad(35) / 2) * camera.position.z;
-  const frac = h < 520 ? 0.58 : (w < h ? 0.5 : 0.4);
-  rig.scale.setScalar(visH * frac / 2);
+  rig.scale.setScalar(visH * 0.5 / 2);
 }
 addEventListener("resize", resize);
 if ("ResizeObserver" in window) new ResizeObserver(resize).observe(canvas);
