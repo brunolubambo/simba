@@ -1,4 +1,4 @@
-import asyncio, os
+import asyncio, inspect, os, time
 from typing import AsyncIterator, Awaitable, Callable
 from claude_agent_sdk import (ClaudeSDKClient, ClaudeAgentOptions, AssistantMessage, UserMessage,
                               TextBlock, ToolUseBlock, ToolResultBlock, ResultMessage)
@@ -17,6 +17,24 @@ from . import browser, celular, pc
 
 Approver = Callable[[str], Awaitable[bool]]
 AGENT_TOOLS = ("Task", "Agent")
+
+
+def _mcp_tool_count(servers: dict) -> int:
+    """Quantas ferramentas MCP foram montadas para esta consulta. Só para o log [perf]."""
+    total = 0
+    for spec in servers.values():
+        if not isinstance(spec, dict):
+            continue
+        if spec.get("type") != "sdk":
+            total += len(browser.NAMES)
+            continue
+        try:
+            entry = spec["instance"]._request_handlers["tools/list"]
+            tools = inspect.getclosurevars(entry.handler).nonlocals.get("tools") or []
+            total += len(tools)
+        except Exception:
+            pass
+    return total
 
 
 def _native_claude() -> str | None:
@@ -40,7 +58,9 @@ class Simba:
         self._build()
 
     def _build(self):
-        system = (PROMPTS / "simba.md").read_text(encoding="utf-8") + "\n\n# Memória\n" + load_context()
+        prompt = (PROMPTS / "simba.md").read_text(encoding="utf-8")
+        memory = load_context()
+        system = prompt + "\n\n# Memória\n" + memory
         servers = {"memory": memory_server, "google": google_server, "vida": life_server, "squad": squad_server,
                    "telegram": telegram_server, "docs": docs_server, "rotinas": routines_server}
         if os.getenv("OBSERVER_ENABLED", "true").lower() == "true":
@@ -51,9 +71,12 @@ class Simba:
             servers["pc"] = pc.pc_server
         if browser.ENABLED:
             servers.update(browser.server_config())
+        agents = build_agents()
+        self._load = {"prompt": len(prompt), "memory": len(memory), "system": len(system),
+                      "agents": len(agents), "mcp": _mcp_tool_count(servers)}
         cli = _native_claude()
         self.options = ClaudeAgentOptions(
-            system_prompt=system, model=MODEL, cwd=str(WORKSPACE), agents=build_agents(), mcp_servers=servers,
+            system_prompt=system, model=MODEL, cwd=str(WORKSPACE), agents=agents, mcp_servers=servers,
             cli_path=cli,
             can_use_tool=make_can_use_tool(self.approve), max_turns=MAX_TURNS, max_budget_usd=MAX_BUDGET_USD,
             permission_mode="default", resume=self.session_id)
@@ -82,17 +105,28 @@ class Simba:
 
     async def ask(self, text: str) -> AsyncIterator[dict]:
         """Eventos: text | tool | agent (working/idle) | done."""
+        t0 = time.perf_counter()
         async with self._lock:
             if CHANGED["flag"]:
                 await self.reload()
             await self.start()
+            load = getattr(self, "_load", {})
+            preview = " ".join(text.split())[:80]
+            print(f"[perf] {time.strftime('%H:%M:%S')} recebida {preview!r} "
+                  f"sistema={load.get('system', '?')}c (prompt={load.get('prompt', '?')} memoria={load.get('memory', '?')}) "
+                  f"agentes={load.get('agents', '?')} mcp={load.get('mcp', '?')}", flush=True)
             ctx = f"[agora: {now_label()} | contas Google conectadas: {authorized() or 'nenhuma'}]\n"
             await self.client.query(ctx + text)
             working: dict[str, str] = {}
+            first_text = False
             async for msg in self.client.receive_response():
                 if isinstance(msg, AssistantMessage):
                     for b in msg.content:
                         if isinstance(b, TextBlock) and not getattr(msg, "parent_tool_use_id", None):
+                            if not first_text:
+                                first_text = True
+                                print(f"[perf] {time.strftime('%H:%M:%S')} primeiro TextBlock "
+                                      f"+{time.perf_counter() - t0:.2f}s", flush=True)
                             yield {"type": "text", "text": b.text}
                         elif isinstance(b, ToolUseBlock):
                             if b.name in AGENT_TOOLS:
@@ -108,6 +142,10 @@ class Simba:
                             yield {"type": "agent", "id": working.pop(b.tool_use_id), "state": "idle"}
                 elif isinstance(msg, ResultMessage):
                     self.session_id = getattr(msg, "session_id", None) or self.session_id
+                    if not first_text:
+                        print(f"[perf] {time.strftime('%H:%M:%S')} primeiro TextBlock ausente", flush=True)
+                    print(f"[perf] {time.strftime('%H:%M:%S')} done +{time.perf_counter() - t0:.2f}s "
+                          f"custo={getattr(msg, 'total_cost_usd', None)}", flush=True)
                     for agent in working.values():
                         yield {"type": "agent", "id": agent, "state": "idle"}
                     yield {"type": "done", "cost_usd": getattr(msg, "total_cost_usd", None)}
