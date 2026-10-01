@@ -58,8 +58,14 @@ def describe(tool: str, i: dict) -> str | None:
         return f"Remover evento {i.get('id')} da agenda {i.get('conta')}"
     if tool == "mcp__squad__agente_remover":
         return f"Remover o especialista '{i.get('id')}'"
-    if tool == "mcp__celular__celular_acao":
-        return None if i.get("acao") in celular.LIVRES else f"No celular: {celular.resumo(i)}"
+    if tool == "mcp__celular__celular_acao" or tool.endswith("__celular_acao"):
+        a = i.get("input") if isinstance(i.get("input"), dict) else i
+        acao = str((a or {}).get("acao") or "").strip()
+        if not acao and (a or {}).get("hora"):
+            acao = "alarme"
+        if acao in celular.LIVRES:
+            return None
+        return f"No celular: {celular.resumo(a or i)}"
     if tool.startswith("mcp__browser__"):
         return f"No navegador: {tool.split('__')[-1].replace('browser_', '')} {str(i)[:250]}"
     if tool in ("Write", "Edit", "NotebookEdit"):

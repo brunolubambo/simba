@@ -149,13 +149,23 @@ async def upload(file: UploadFile = File(...), token: str = Query(""), note: str
     return {"ok": True}
 
 
-def _check_celular(token: str):
-    if not celular.token_ok(token):
+def _token_celular(request: Request, token: str = "") -> str:
+    """Query ainda vale; o app novo manda o código no header para não aparecer no log HTTP."""
+    if token:
+        return token
+    auth = request.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return (request.headers.get("x-simba-token") or "").strip()
+
+
+def _check_celular(request: Request, token: str = ""):
+    if not celular.token_ok(_token_celular(request, token)):
         raise HTTPException(401, "token inválido")
 
 
 async def _celular_campos(request: Request, id: str, ok: str, detalhe: str) -> tuple[str, bool, str]:
-    """Tasker manda JSON, formulário ou query; todos os valores podem vir como texto."""
+    """O app manda JSON, formulário ou query; todos os valores podem vir como texto."""
     body: dict = {}
     ctype = (request.headers.get("content-type") or "").lower()
     try:
@@ -175,9 +185,9 @@ async def _celular_campos(request: Request, id: str, ok: str, detalhe: str) -> t
 
 
 @app.get("/celular/proximo")
-def celular_proximo(token: str = Query("")):
+def celular_proximo(request: Request, token: str = Query("")):
     """O app SIMBA puxa o próximo comando. 204 = nada a fazer."""
-    _check_celular(token)
+    _check_celular(request, token)
     pedido = celular.proximo()
     if not pedido:
         return Response(status_code=204)
@@ -188,7 +198,7 @@ def celular_proximo(token: str = Query("")):
 async def celular_resultado(request: Request, token: str = Query(""),
                             id: str = Query(""), ok: str = Query(""), detalhe: str = Query("")):
     """O app avisa como terminou um comando. Sem este POST o SIMBA não considera a ação feita."""
-    _check_celular(token)
+    _check_celular(request, token)
     cmd, sucesso, nota = await _celular_campos(request, id, ok, detalhe)
     if not cmd:
         raise HTTPException(400, "id ausente")
@@ -198,7 +208,7 @@ async def celular_resultado(request: Request, token: str = Query(""),
 @app.post("/celular/foto")
 async def celular_foto(request: Request, token: str = Query(""), id: str = Query("")):
     """O app envia a foto tirada. Completa o comando `foto` com o caminho no workspace."""
-    _check_celular(token)
+    _check_celular(request, token)
     cmd = id.strip()
     if not cmd:
         raise HTTPException(400, "id ausente")

@@ -11,8 +11,8 @@ android {
         applicationId = "app.simba.assistant"
         minSdk = 29
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 3
+        versionName = "1.2"
     }
 
     buildTypes {

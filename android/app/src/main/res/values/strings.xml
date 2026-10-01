@@ -7,6 +7,9 @@
     <string name="token_hint">Código de acesso</string>
     <string name="start">Ativar escuta</string>
     <string name="listening_note">Escuta ligada. O Android mostra um aviso permanente porque o microfone está aberto. Não precisa deixar este aplicativo na tela.</string>
+    <string name="listening_ok">Escuta ligada. Servidor alcançado — pode pedir o alarme no site.</string>
+    <string name="listening_bad">Escuta ligada, mas o servidor respondeu %1$d. Confira o endereço.</string>
+    <string name="listening_offline">Escuta ligada, mas este app não alcançou o servidor. Confira o endereço (o mesmo do site, sem barra no fim).</string>
     <string name="notification_title">SIMBA ouvindo</string>
     <string name="notification_text">Diga “ei, Simba”</string>
     <string name="notification_stop">Parar</string>
