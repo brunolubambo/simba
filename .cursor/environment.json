@@ -1,0 +1,18 @@
+{
+  "name": "SIMBA",
+  "install": "bash -s << 'EOF'\nset -euo pipefail\nif [ -f .cursor/install.sh ]; then\n  bash .cursor/install.sh\n  exit 0\nfi\nif ! python3 -c 'import ensurepip' >/dev/null 2>&1; then\n  sudo -n apt-get update\n  sudo -n apt-get install -y python3-venv || sudo -n apt-get install -y python3.12-venv\nfi\npython3 -m venv .venv\n.venv/bin/python -m pip install -U pip\n.venv/bin/python -m pip install -r requirements.txt 'claude-agent-sdk>=0.1.0' 'google-api-python-client>=2.100.0' 'google-auth>=2.23.0' 'google-auth-oauthlib>=1.1.0' 'google-auth-httplib2>=0.1.1' 'pywebpush>=1.14.0' 'py-vapid>=1.9.0' 'mss>=9.0.0'\nEOF",
+  "start": "bash -s << 'EOF'\nset -euo pipefail\nif [ -f .cursor/start.sh ]; then\n  bash .cursor/start.sh\n  exit 0\nfi\nREPO=\"$(pwd)\"\nROOT=\"${SIMBA_DEV_ROOT:-$HOME/simba-dev}\"\nexport SIMBA_DEV_ROOT=\"$ROOT\"\nexport SIMBA_TOKEN=\"${SIMBA_TOKEN:-dev-simba-token}\"\nexport OBSERVER_ENABLED=\"${OBSERVER_ENABLED:-false}\"\nexport PYTHONPATH=\"$ROOT${PYTHONPATH:+:$PYTHONPATH}\"\nmkdir -p \"$ROOT/simba\" \"$ROOT/pwa\" \"$ROOT/data\" \"$ROOT/workspace\"\nif ! mountpoint -q \"$ROOT/simba\"; then\n  sudo -n mount --bind \"$REPO\" \"$ROOT/simba\"\nfi\nif [ ! -f \"$ROOT/pwa/index.html\" ]; then\n  printf '%s\\n' '<!DOCTYPE html><html lang=\"pt-BR\"><head><meta charset=\"utf-8\"><title>SIMBA</title></head><body><h1>SIMBA</h1><p>Servidor local.</p></body></html>' > \"$ROOT/pwa/index.html\"\nfi\ncd \"$ROOT\"\n\"$REPO/.venv/bin/python\" -c 'import simba.server; print(\"simba server import ok\")'\nEOF",
+  "terminals": [
+    {
+      "name": "simba-server",
+      "command": "bash -s << 'EOF'\nset -euo pipefail\nif [ -f .cursor/dev-server.sh ]; then\n  bash .cursor/dev-server.sh\n  exit 0\nfi\nREPO=\"$(pwd)\"\nROOT=\"${SIMBA_DEV_ROOT:-$HOME/simba-dev}\"\nexport SIMBA_DEV_ROOT=\"$ROOT\"\nexport SIMBA_TOKEN=\"${SIMBA_TOKEN:-dev-simba-token}\"\nexport OBSERVER_ENABLED=\"${OBSERVER_ENABLED:-false}\"\nexport PYTHONPATH=\"$ROOT${PYTHONPATH:+:$PYTHONPATH}\"\nmkdir -p \"$ROOT/simba\" \"$ROOT/pwa\" \"$ROOT/data\" \"$ROOT/workspace\"\nif ! mountpoint -q \"$ROOT/simba\"; then\n  sudo -n mount --bind \"$REPO\" \"$ROOT/simba\"\nfi\nif [ ! -f \"$ROOT/pwa/index.html\" ]; then\n  printf '%s\\n' '<!DOCTYPE html><html lang=\"pt-BR\"><head><meta charset=\"utf-8\"><title>SIMBA</title></head><body><h1>SIMBA</h1></body></html>' > \"$ROOT/pwa/index.html\"\nfi\ncd \"$ROOT\"\nexec \"$REPO/.venv/bin/python\" -m uvicorn simba.server:app --host 0.0.0.0 --port 8000\nEOF",
+      "description": "SIMBA FastAPI server on port 8000. Local token defaults to dev-simba-token. Screen observer is off unless OBSERVER_ENABLED=true."
+    }
+  ],
+  "ports": [
+    {
+      "name": "simba",
+      "port": 8000
+    }
+  ]
+}

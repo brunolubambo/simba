@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SIMBA</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --blue: #0582f6;
+      --blue-deep: #254050;
+      --blue-soft: #219d9e;
+      --ink: #3e3e3d;
+      --white: #ffffff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--white);
+      color: var(--ink);
+    }
+    header {
+      background: var(--blue-deep);
+      color: var(--white);
+      padding: 28px 24px;
+    }
+    header p { margin: 8px 0 0; max-width: 40rem; }
+    main { max-width: 46rem; margin: 0 auto; padding: 24px; }
+    section {
+      border: 1px solid var(--blue-deep);
+      background: var(--white);
+      padding: 16px 18px;
+      margin-bottom: 16px;
+    }
+    h1, h2 { margin: 0; font-weight: 600; }
+    h2 { color: var(--blue-deep); font-size: 1.05rem; }
+    button, input {
+      font: inherit;
+      color: var(--ink);
+      border: 1px solid var(--blue-deep);
+      background: var(--white);
+      padding: 8px 12px;
+    }
+    button {
+      background: var(--blue);
+      color: var(--white);
+      border-color: var(--blue);
+      cursor: pointer;
+    }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    input { flex: 1; min-width: 12rem; }
+    pre {
+      white-space: pre-wrap;
+      background: var(--white);
+      color: var(--blue-deep);
+      border-left: 4px solid var(--blue-soft);
+      margin: 12px 0 0;
+      padding: 8px 12px;
+    }
+    .ok { color: var(--blue-soft); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>SIMBA</h1>
+    <p>Assistente local. Esta página confirma que o servidor está no ar e que o painel responde.</p>
+  </header>
+  <main>
+    <section>
+      <h2>Saúde do servidor</h2>
+      <div class="row">
+        <button id="health-btn" type="button">Consultar /health</button>
+      </div>
+      <pre id="health-out">Aguardando consulta.</pre>
+    </section>
+    <section>
+      <h2>Painel</h2>
+      <p>Informe o token local (<code>SIMBA_TOKEN</code>) para ler lembretes, agentes e memória.</p>
+      <div class="row">
+        <input id="token" type="password" autocomplete="off" placeholder="token" />
+        <button id="painel-btn" type="button">Abrir painel</button>
+      </div>
+      <pre id="painel-out">Nenhuma consulta ainda.</pre>
+    </section>
+  </main>
+  <script>
+    const healthOut = document.getElementById("health-out");
+    const painelOut = document.getElementById("painel-out");
+
+    async function show(el, path) {
+      el.textContent = "Consultando…";
+      try {
+        const res = await fetch(path);
+        const body = await res.text();
+        el.textContent = res.status + " " + res.statusText + "\n" + body;
+      } catch (err) {
+        el.textContent = "Falha: " + err;
+      }
+    }
+
+    document.getElementById("health-btn").addEventListener("click", () => {
+      show(healthOut, "/health");
+    });
+    document.getElementById("painel-btn").addEventListener("click", () => {
+      const token = document.getElementById("token").value;
+      show(painelOut, "/painel?token=" + encodeURIComponent(token));
+    });
+    show(healthOut, "/health");
+  </script>
+</body>
+</html>
