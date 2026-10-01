@@ -34,8 +34,10 @@ def check(token: str):
         raise HTTPException(401, "token inválido")
 
 
-async def run_and_broadcast(text: str, origin: str):
+async def run_and_broadcast(text: str, origin: str, voice: bool = False):
     await hub.broadcast({"type": "user", "text": text, "device": origin})
+    if voice:
+        text = "[por voz: 1 ou 2 frases, sem markdown, pronto para falar]\n" + text
     final: list[str] = []                    # texto depois da última ferramenta = a resposta final
     try:
         async for ev in state["simba"].ask(text):
@@ -110,7 +112,7 @@ async def ws(socket: WebSocket, token: str = "", device: str = "pc"):
             data = json.loads(await socket.receive_text())
             kind = data.get("type")
             if kind == "message" and data.get("text", "").strip():
-                t = asyncio.create_task(run_and_broadcast(data["text"], device))
+                t = asyncio.create_task(run_and_broadcast(data["text"], device, bool(data.get("voice"))))
                 tasks.add(t); t.add_done_callback(tasks.discard)
             elif kind == "approve":
                 hub.resolve(data.get("id", ""), data.get("ok", False))

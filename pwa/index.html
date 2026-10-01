@@ -530,17 +530,16 @@ function pickVoice() {
 if ("speechSynthesis" in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
 function spoken(t) {
   return t
-    .replace(/```[a-zA-Z0-9_-]*\n?/g, " ")
+    .replace(/```[\s\S]*?```/g, " ")
     .replace(/`([^`]+)`/g, "$1")
     .replace(/!\[[^\]]*\]\([^)]+\)/g, " ")
     .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-    .replace(/https?:\/\/[^\s<>)\]]+/g, u => {
-      const trail = (u.match(/[.,;:!?]+$/) || [""])[0];
-      const core = u.slice(0, u.length - trail.length);
-      return core.replace(/^https?:\/\//, "").replace(/[\/?#&=_%+.-]+/g, " ") + trail;
-    })
+    .replace(/https?:\/\/\S+/g, " link ")
+    .replace(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/gi, " e-mail ")
     .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*]\s+/gm, "")
     .replace(/[*_>#|]/g, "")
+    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -750,7 +749,7 @@ if (SR) {
 function dispatch(cmd) {
   if (!cmd) return;
   if (/^(obrigad|valeu|era isso|so isso|pode parar|dispensado)/.test(norm(cmd))) { convoUntil = 0; return say("Às ordens."); }
-  sendMessage(cmd);
+  sendMessage(cmd, true);
 }
 function handleUtterance(t) {
   const n = norm(t);
@@ -799,9 +798,9 @@ const shown = t => t.replace(/\*\*(.+?)\*\*/g, "$1").replace(/__(.+?)__/g, "$1")
 function showSaid(t) { const s = $("#said"); s.textContent = t; s.classList.toggle("long", t.length > 160); s.scrollTop = 0; }
 const online = () => ws && ws.readyState === 1;
 function send(o) { if (online()) ws.send(JSON.stringify(o)); else if (o.type === "message") outbox.push(o); }
-function sendMessage(text) {
+function sendMessage(text, voice) {
   silenceNow(); perfReset(); turnOpen = true; voiced = ""; turnText = []; lastSaid = "";
-  $("#heard").textContent = "› " + text; send({ type: "message", text });
+  $("#heard").textContent = "› " + text; send({ type: "message", text, voice: !!voice });
   setState("thinking", online() ? "processando" : "sem conexão · envio ao reconectar");
 }
 function rejectToken() { store.del("st"); TOKEN = ""; outbox = []; showLogin(); setState(null, "código recusado"); }
