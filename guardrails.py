@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 from .config import WORKSPACE, ACCOUNTS
-from . import browser, celular
+from . import browser, celular, pc
 
 FREE = {"Read", "Glob", "Grep", "WebSearch", "WebFetch", "TodoWrite", "Task", "Agent",
         "mcp__memory__remember", "mcp__memory__recall", "mcp__vision__screenshot",
@@ -66,6 +66,12 @@ def describe(tool: str, i: dict) -> str | None:
         if acao in celular.LIVRES:
             return None
         return f"No celular: {celular.resumo(a or i)}"
+    if tool == "mcp__pc__pc_acao" or tool.endswith("__pc_acao"):
+        a = i.get("input") if isinstance(i.get("input"), dict) else i
+        acao = str((a or {}).get("acao") or "").strip()
+        if acao in pc.LIVRES:
+            return None
+        return f"No PC: {pc.resumo(a or i)}"
     if tool.startswith("mcp__browser__"):
         return f"No navegador: {tool.split('__')[-1].replace('browser_', '')} {str(i)[:250]}"
     if tool in ("Write", "Edit", "NotebookEdit"):

@@ -12,7 +12,7 @@ from .life import life_server
 from .squad import squad_server, CHANGED
 from .telegram import telegram_server
 from .documentos import docs_server
-from . import browser, celular
+from . import browser, celular, pc
 
 Approver = Callable[[str], Awaitable[bool]]
 AGENT_TOOLS = ("Task", "Agent")
@@ -46,6 +46,8 @@ class Simba:
             servers["vision"] = vision_server
         if celular.enabled():
             servers["celular"] = celular.celular_server
+        if pc.enabled() and pc.pc_server:
+            servers["pc"] = pc.pc_server
         if browser.ENABLED:
             servers.update(browser.server_config())
         cli = _native_claude()

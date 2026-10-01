@@ -4,7 +4,8 @@ WebSocket /ws?token=...&device=pc|celular
   saída:   text | tool | done | approval | approval_closed | suggestion | activity | status | error
 HTTP: POST /upload?token= (imagem do celular, ex.: Atalho do iOS) | POST /push/subscribe | GET /push/key
       POST /tts?token= ({text} -> {id}) + GET /tts/{id}?token= (voz neural em MP3, transmitida) | POST /telegram/webhook (mensagens do bot, ver telegram.py)
-      POST /celular/resultado?token= , GET /celular/proximo?token= e POST /celular/foto?token=&id= (o app confirma um comando, ver celular.py)"""
+      POST /celular/resultado?token= , GET /celular/proximo?token= e POST /celular/foto?token=&id= (o app confirma um comando, ver celular.py)
+      GET /pc/proximo e POST /pc/resultado (agente local do PC pessoal, ver pc.py)"""
 import asyncio, json, os, re, secrets, time
 from datetime import date
 from contextlib import asynccontextmanager
@@ -17,7 +18,7 @@ from .config import ROOT, WORKSPACE, ACCOUNTS, public_url
 from .core import Simba
 from .hub import Hub, save_sub, send_push, vapid, PUSH_TOO
 from .observer import Observer
-from . import tasks, life, google, memory, telegram, celular
+from . import tasks, life, google, memory, telegram, celular, pc
 from .agents import roster
 
 TOKEN = os.getenv("SIMBA_TOKEN", "")
@@ -70,7 +71,9 @@ def status() -> dict:
     return {"type": "status", "devices": hub.devices(), "observer": state["observer"].enabled,
             "observer_available": state["observer"].available,
             "google": {c: {"email": e, "ok": c in ok} for c, e in ACCOUNTS.items()},
-            "telegram": telegram.snapshot(), "celular": {"ok": celular.enabled()}}
+            "telegram": telegram.snapshot(),
+            "celular": {"ok": celular.enabled()},
+            "pc": {"ok": pc.enabled(), "agente": pc.conectado()}}
 
 
 @asynccontextmanager
@@ -149,8 +152,8 @@ async def upload(file: UploadFile = File(...), token: str = Query(""), note: str
     return {"ok": True}
 
 
-def _token_celular(request: Request, token: str = "") -> str:
-    """Query ainda vale; o app novo manda o código no header para não aparecer no log HTTP."""
+def _token_pedido(request: Request, token: str = "") -> str:
+    """Query, Authorization Bearer ou X-Simba-Token."""
     if token:
         return token
     auth = request.headers.get("authorization") or ""
@@ -160,7 +163,12 @@ def _token_celular(request: Request, token: str = "") -> str:
 
 
 def _check_celular(request: Request, token: str = ""):
-    if not celular.token_ok(_token_celular(request, token)):
+    if not celular.token_ok(_token_pedido(request, token)):
+        raise HTTPException(401, "token inválido")
+
+
+def _check_pc(request: Request):
+    if not pc.token_ok(_token_pedido(request)):
         raise HTTPException(401, "token inválido")
 
 
@@ -237,6 +245,35 @@ async def celular_foto(request: Request, token: str = Query(""), id: str = Query
     path = inbox / f"celular_foto_{cmd}.{ext}"
     path.write_bytes(data)
     return {"ok": True, "aproveitado": celular.report(cmd, True, str(path))}
+
+
+@app.get("/pc/proximo")
+def pc_proximo(request: Request):
+    """O agente do PC puxa o próximo comando. 204 = nada a fazer."""
+    _check_pc(request)
+    pedido = pc.proximo()
+    if not pedido:
+        return Response(status_code=204)
+    return pedido
+
+
+@app.post("/pc/resultado")
+async def pc_resultado(request: Request):
+    """O agente avisa como terminou um comando. Sem este POST o SIMBA não considera a acção feita."""
+    _check_pc(request)
+    body: dict = {}
+    try:
+        raw = await request.json()
+        if isinstance(raw, dict):
+            body = raw
+    except Exception:
+        body = {}
+    cmd = str(body.get("id") or "").strip()
+    if not cmd:
+        raise HTTPException(400, "id ausente")
+    sucesso = pc.verdade(body.get("ok"))
+    nota = str(body.get("detalhe") or "")[:80000]
+    return {"ok": True, "aproveitado": pc.report(cmd, sucesso, nota)}
 
 
 @app.get("/push/key")
