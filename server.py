@@ -4,11 +4,16 @@ WebSocket /ws?token=...&device=pc|celular
   saída:   text | tool | done | approval | approval_closed | suggestion | activity | status | error
 HTTP: POST /upload?token= (imagem do celular, ex.: Atalho do iOS) | POST /push/subscribe | GET /push/key
       POST /tts?token= ({text} -> {id}) + GET /tts/{id}?token= (voz neural em MP3, transmitida) | POST /telegram/webhook (mensagens do bot, ver telegram.py)"""
-import asyncio, json, os, re, secrets, time
+import asyncio, json, os, re, secrets, sys, time
 from datetime import date
 from contextlib import asynccontextmanager
+from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
+# google.py deste projeto não pode sombrear a biblioteca Google.
+# Isso acontece quando o servidor sobe com a pasta do repositório no sys.path.
+_pkg = Path(__file__).resolve().parent
+sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != _pkg]
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, HTTPException, Query, Body, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
