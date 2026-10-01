@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 from .config import WORKSPACE, ACCOUNTS
-from . import browser
+from . import browser, celular
 
 FREE = {"Read", "Glob", "Grep", "WebSearch", "WebFetch", "TodoWrite", "Task", "Agent",
         "mcp__memory__remember", "mcp__memory__recall", "mcp__vision__screenshot",
@@ -58,6 +58,8 @@ def describe(tool: str, i: dict) -> str | None:
         return f"Remover evento {i.get('id')} da agenda {i.get('conta')}"
     if tool == "mcp__squad__agente_remover":
         return f"Remover o especialista '{i.get('id')}'"
+    if tool == "mcp__celular__celular_acao":
+        return None if i.get("acao") in celular.LIVRES else f"No celular: {celular.resumo(i)}"
     if tool.startswith("mcp__browser__"):
         return f"No navegador: {tool.split('__')[-1].replace('browser_', '')} {str(i)[:250]}"
     if tool in ("Write", "Edit", "NotebookEdit"):

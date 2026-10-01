@@ -3,7 +3,8 @@ WebSocket /ws?token=...&device=pc|celular
   entrada: {type:message,text} | {type:approve,id,ok} | {type:accept,id} | {type:dismiss,id} | {type:reminder_snooze,id,min} | {type:observer,on}
   saída:   text | tool | done | approval | approval_closed | suggestion | activity | status | error
 HTTP: POST /upload?token= (imagem do celular, ex.: Atalho do iOS) | POST /push/subscribe | GET /push/key
-      POST /tts?token= ({text} -> {id}) + GET /tts/{id}?token= (voz neural em MP3, transmitida) | POST /telegram/webhook (mensagens do bot, ver telegram.py)"""
+      POST /tts?token= ({text} -> {id}) + GET /tts/{id}?token= (voz neural em MP3, transmitida) | POST /telegram/webhook (mensagens do bot, ver telegram.py)
+      POST /celular/resultado?token= e POST /celular/foto?token=&id= (o Tasker confirma um comando, ver celular.py)"""
 import asyncio, json, os, re, secrets, time
 from datetime import date
 from contextlib import asynccontextmanager
@@ -16,7 +17,7 @@ from .config import ROOT, WORKSPACE, ACCOUNTS, public_url
 from .core import Simba
 from .hub import Hub, save_sub, send_push, vapid, PUSH_TOO
 from .observer import Observer
-from . import tasks, life, google, memory, telegram
+from . import tasks, life, google, memory, telegram, celular
 from .agents import roster
 
 TOKEN = os.getenv("SIMBA_TOKEN", "")
@@ -69,7 +70,7 @@ def status() -> dict:
     return {"type": "status", "devices": hub.devices(), "observer": state["observer"].enabled,
             "observer_available": state["observer"].available,
             "google": {c: {"email": e, "ok": c in ok} for c, e in ACCOUNTS.items()},
-            "telegram": telegram.snapshot()}
+            "telegram": telegram.snapshot(), "celular": {"ok": celular.enabled()}}
 
 
 @asynccontextmanager
@@ -146,6 +147,76 @@ async def upload(file: UploadFile = File(...), token: str = Query(""), note: str
               f"{('Pedido: ' + note) if note else 'Entenda o que ele está fazendo e antecipe: diga o que você faria e faça o que for seguro.'}")
     asyncio.create_task(run_and_broadcast(prompt, "celular"))
     return {"ok": True}
+
+
+def _check_celular(token: str):
+    if not celular.token_ok(token):
+        raise HTTPException(401, "token inválido")
+
+
+async def _celular_campos(request: Request, id: str, ok: str, detalhe: str) -> tuple[str, bool, str]:
+    """Tasker manda JSON, formulário ou query; todos os valores podem vir como texto."""
+    body: dict = {}
+    ctype = (request.headers.get("content-type") or "").lower()
+    try:
+        if "application/json" in ctype:
+            raw = await request.json()
+            if isinstance(raw, dict):
+                body = raw
+        elif "application/x-www-form-urlencoded" in ctype or "multipart/form-data" in ctype:
+            form = await request.form()
+            body = {k: form.get(k) for k in ("id", "ok", "detalhe")}
+    except Exception:
+        body = {}
+    cmd = str(id or body.get("id") or "").strip()
+    sucesso = celular.verdade(ok if ok != "" else body.get("ok"))
+    nota = str(detalhe or body.get("detalhe") or "")[:300]
+    return cmd, sucesso, nota
+
+
+@app.post("/celular/resultado")
+async def celular_resultado(request: Request, token: str = Query(""),
+                            id: str = Query(""), ok: str = Query(""), detalhe: str = Query("")):
+    """O Tasker avisa como terminou um comando. Sem este POST o SIMBA não considera a ação feita."""
+    _check_celular(token)
+    cmd, sucesso, nota = await _celular_campos(request, id, ok, detalhe)
+    if not cmd:
+        raise HTTPException(400, "id ausente")
+    return {"ok": True, "aproveitado": celular.report(cmd, sucesso, nota)}
+
+
+@app.post("/celular/foto")
+async def celular_foto(request: Request, token: str = Query(""), id: str = Query("")):
+    """O Tasker envia a foto tirada. Completa o comando `foto` com o caminho no workspace."""
+    _check_celular(token)
+    cmd = id.strip()
+    if not cmd:
+        raise HTTPException(400, "id ausente")
+    ctype = (request.headers.get("content-type") or "").lower()
+    data = b""
+    ext = "jpg"
+    if "multipart/form-data" in ctype:
+        form = await request.form()
+        up = form.get("file") or form.get("foto")
+        if up is None:
+            up = next((v for v in form.values() if hasattr(v, "read")), None)
+        if up is None:
+            raise HTTPException(400, "arquivo ausente")
+        data = await up.read()
+        name = getattr(up, "filename", "") or ""
+        if "." in name:
+            ext = name.rsplit(".", 1)[-1][:5].lower()
+    else:
+        data = await request.body()
+    if not data:
+        raise HTTPException(400, "arquivo vazio")
+    if len(data) > celular.FOTO_MAX:
+        raise HTTPException(413, "foto grande demais")
+    inbox = WORKSPACE / ".inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    path = inbox / f"celular_foto_{cmd}.{ext}"
+    path.write_bytes(data)
+    return {"ok": True, "aproveitado": celular.report(cmd, True, str(path))}
 
 
 @app.get("/push/key")
