@@ -1,4 +1,4 @@
-const CACHE = "simba-hud-1";
+const CACHE = "simba-hud-4";
 const SHELL = ["./", "index.html", "hud.js", "manifest.json", "icon.svg",
   "vendor/three/build/three.module.js",
   "vendor/three/examples/jsm/postprocessing/EffectComposer.js",

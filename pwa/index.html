@@ -21,7 +21,7 @@
   --glow:0 0 6px rgba(94,231,255,.8),0 0 18px rgba(31,182,255,.45);
 }
 *{box-sizing:border-box}
-html,body{height:100%}
+html,body{height:100%;background:var(--bg)}
 body{margin:0;background:var(--bg);color:var(--text);font:17px/1.45 Rajdhani,system-ui,sans-serif;overflow:hidden;
   display:flex;flex-direction:column;height:100dvh;
   background-image:radial-gradient(ellipse at 50% 40%,#041a33,transparent 58%)}
@@ -41,9 +41,11 @@ body::after{content:"";position:fixed;inset:0;pointer-events:none;opacity:.35;
 #hudLink{right:16px}
 #hudLink.off{opacity:.35}
 
-#caption{padding:4px 18px 2px;text-align:center}
-#heard{color:var(--muted);font-size:15px;min-height:20px}
-#said{max-height:min(28vh,11rem);overflow:auto;white-space:pre-wrap;font-size:16px;padding:2px 6px 6px}
+#caption{position:absolute;left:0;right:0;bottom:34px;z-index:3;padding:22px 18px 2px;text-align:center;pointer-events:none;
+  background:linear-gradient(transparent,rgba(2,8,18,.82) 36%)}
+#heard{color:var(--muted);font-size:15px}
+#heard:empty{display:none}
+#said{max-height:min(18vh,7.5rem);overflow:auto;white-space:pre-wrap;font-size:16px;padding:2px 6px 6px;pointer-events:auto}
 #said:empty{display:none}
 
 #alerts{position:fixed;top:max(10px,env(safe-area-inset-top));left:12px;width:min(300px,calc(100vw - 24px));z-index:4;display:flex;flex-direction:column;gap:6px}
@@ -90,13 +92,12 @@ footer{display:flex;gap:8px;padding:8px 12px;padding-bottom:max(8px,env(safe-are
 <section id="stage">
   <canvas id="core" aria-hidden="true"></canvas>
   <div id="hudMarks" aria-hidden="true"><span id="hudHealth">sistema</span><span id="hudLink" class="off">conexão</span></div>
+  <div id="caption" aria-live="polite">
+    <div id="heard"></div>
+    <div id="said"></div>
+  </div>
   <div id="state" aria-live="polite"><span class="label" id="stateTxt">DIGA “EI, SIMBA”</span></div>
 </section>
-
-<div id="caption" aria-live="polite">
-  <div id="heard"></div>
-  <div id="said"></div>
-</div>
 <div id="alerts" aria-live="assertive"></div>
 <div id="grid" aria-label="Agentes"></div>
 
@@ -128,19 +129,8 @@ const T = () => encodeURIComponent(TOKEN);
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 let audioCtx, analyser, mediaSrc, voiceBins, freqBins;
 function ensureVoiceTap() {
-  const AC = window.AudioContext || window.webkitAudioContext;
-  if (!AC || mediaSrc) return;
-  try {
-    audioCtx = audioCtx || new AC();
-    analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 512;
-    analyser.smoothingTimeConstant = 0.55;
-    mediaSrc = audioCtx.createMediaElementSource(player);
-    mediaSrc.connect(analyser);
-    analyser.connect(audioCtx.destination);
-    voiceBins = new Uint8Array(analyser.fftSize);
-    freqBins = new Uint8Array(analyser.frequencyBinCount);
-  } catch { mediaSrc = null; }
+  // Vazio de propósito. No Windows o <audio> já sai nos alto-falantes; qualquer
+  // captura (createMediaElementSource ou captureStream) toca a mesma voz de novo.
 }
 function simbaLevels() {
   let rms = 0, bass = 0, mid = 0, high = 0;
@@ -206,8 +196,8 @@ let speaking = false, voice = null, convoUntil = 0;
 // voz neural do servidor (Antonio); se falhar, usa a voz do próprio celular
 const player = new Audio(); let sayId = 0, playingUrl = null, serverVoiceOffUntil = 0;
 function unlockAudio() {  // iOS só toca áudio depois de um toque: toca um silêncio para liberar o player
-  ensureVoiceTap();
-  try { audioCtx && audioCtx.resume(); } catch {}
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (AC) { try { audioCtx = audioCtx || new AC(); audioCtx.resume(); } catch {} }
   if (playingUrl && !player.paused) return;            // já está falando com a voz do servidor: não interrompe
   try { player.onended = player.onerror = null;
         player.src = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA="; player.play().catch(() => {}); } catch {}
@@ -321,7 +311,6 @@ async function pumpSay() {
   sayBusy = true;
   const gen = sayGen;
   stopListening(); speaking = true; setState("speaking", "falando"); animateBars(true);
-  ensureVoiceTap();
   try { audioCtx && audioCtx.resume(); } catch {}
   try {
     let ahead = sayQueue.length ? fetchClip(sayQueue[0], gen) : null;
