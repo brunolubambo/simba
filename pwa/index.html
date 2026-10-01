@@ -46,6 +46,7 @@ body::after{content:"";position:fixed;inset:0;pointer-events:none;
 .alert .body{white-space:pre-wrap;max-height:110px;overflow:auto}
 .alert .row{display:flex;gap:8px;margin-top:6px;flex-wrap:wrap}
 .alert button{font:600 14px Rajdhani,sans-serif;letter-spacing:.08em;background:transparent;border:1px solid currentColor;color:inherit;padding:6px 12px;min-height:36px}
+.alert input{flex:1;min-width:0;background:rgba(4,20,32,.7);border:1px solid var(--holo-dim);color:var(--text);font:16px Rajdhani,sans-serif;padding:8px}
 
 #grid{display:none}
 .ag{border:1px solid var(--holo-faint);background:rgba(4,18,30,.5);padding:6px 5px 5px;text-align:center;transition:all .25s;
@@ -137,18 +138,7 @@ function resizeGlobe() {
   gctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 function ensureVoiceTap() {
-  const AC = window.AudioContext || window.webkitAudioContext;
-  if (!AC || mediaSrc) return;
-  try {
-    audioCtx = audioCtx || new AC();
-    analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 512;
-    analyser.smoothingTimeConstant = 0.55;
-    mediaSrc = audioCtx.createMediaElementSource(player);
-    mediaSrc.connect(analyser);
-    analyser.connect(audioCtx.destination);
-    voiceBins = new Uint8Array(analyser.fftSize);
-  } catch { mediaSrc = null; }
+  // Não ligar o player no AudioContext: o elemento já sai nos alto-falantes, e o grafo repetia a mesma voz.
 }
 function sampleVoice(speaking, t) {
   if (!speaking || reduceMotion) return voiceLevel * 0.8;
@@ -554,41 +544,153 @@ function spoken(t) {
     .replace(/\s+/g, " ")
     .trim();
 }
-function doneSpeaking() { speaking = false; animateBars(false); convoUntil = Date.now() + 15000; setState(null, "online"); startListening(); }
+function doneSpeaking() {
+  speaking = false; animateBars(false); convoUntil = Date.now() + 15000; echoUntil = Date.now() + 900;
+  setState(null, "online");
+  setTimeout(() => { if (!speaking) startListening(); }, 400);
+}
 function freeUrl() { if (playingUrl) { URL.revokeObjectURL(playingUrl); playingUrl = null; } }
-function sayBrowser(t) {
-  if (!("speechSynthesis" in window)) return doneSpeaking();
+function sayBrowser(t, done) {
+  if (!("speechSynthesis" in window)) return done();
   const u = new SpeechSynthesisUtterance(t); u.lang = "pt-BR"; if (voice) u.voice = voice; u.rate = 1.05;
-  u.onend = u.onerror = doneSpeaking;
+  u.onend = u.onerror = () => done();
   speechSynthesis.speak(u);
 }
-async function say(text) {
-  if (!text) return;
-  const t = spoken(text), id = ++sayId;
+let sayQueue = [], sayBusy = false, sayGen = 0, playFinish = null, voiced = "", turnOpen = false, playingText = "";
+let lastSaid = "", echoUntil = 0, lastHeard = "", lastHeardAt = 0;
+function silenceNow() {
+  sayGen++; sayQueue = [];
+  const finish = playFinish; playFinish = null;
   if ("speechSynthesis" in window) speechSynthesis.cancel();
+  player.onended = player.onerror = null;
+  try { player.pause(); } catch {}
+  try { player.removeAttribute("src"); player.load(); } catch {}
+  freeUrl(); speaking = false;
+  if (finish) finish();
+}
+function say(text) {
+  const t = spoken(text);
+  if (!t || t === playingText || t === sayQueue[sayQueue.length - 1]) return;
+  sayQueue.push(t);
+  pumpSay();
+}
+async function fetchClip(text, gen) {
+  try {
+    if (!TOKEN || Date.now() <= serverVoiceOffUntil || gen !== sayGen) return null;
+    const r = await fetch(`/tts?token=${T()}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
+    if (!r.ok || gen !== sayGen) return null;
+    const job = (await r.json()).id;
+    if (!job || gen !== sayGen) return null;
+    const audio = await fetch(`/tts/${job}?token=${T()}`);
+    if (!audio.ok || gen !== sayGen) return null;
+    const blob = await audio.blob();
+    if (!blob.size || gen !== sayGen) return null;
+    return URL.createObjectURL(blob);
+  } catch { return null; }
+}
+function playClip(url, text, gen) {
+  return new Promise(resolve => {
+    if (gen !== sayGen) { if (url) URL.revokeObjectURL(url); return resolve(); }
+    let settled = false, heard = false, browser = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (playingText === text) playingText = "";
+      playFinish = null;
+      resolve();
+    };
+    playFinish = finish;
+    playingText = text;
+    const fallback = () => {
+      if (browser || heard || gen !== sayGen) return;
+      browser = true;
+      if ("speechSynthesis" in window) speechSynthesis.cancel();
+      player.onended = player.onerror = null;
+      try { player.pause(); player.removeAttribute("src"); player.load(); } catch {}
+      freeUrl();
+      sayBrowser(text, finish);
+    };
+    if (!url) return fallback();
+    player.onended = () => { heard = true; playingUrl = null; finish(); };
+    player.onerror = () => {
+      playingUrl = null;
+      if (heard || player.currentTime >= 0.05) { if (player.paused || player.ended) finish(); return; }
+      fallback();
+    };
+    playingUrl = url;
+    player.src = url;
+    player.play().then(() => { heard = true; }).catch(e => {
+      if (gen !== sayGen || heard || browser) return;
+      if (!(e && e.name === "NotAllowedError")) serverVoiceOffUntil = Date.now() + 5 * 60 * 1000;
+      fallback();
+    });
+  });
+}
+async function pumpSay() {
+  if (sayBusy) return;
+  sayBusy = true;
+  const gen = sayGen;
+  stopListening(); speaking = true; setState("speaking", "falando"); animateBars(true);
   ensureVoiceTap();
   try { audioCtx && audioCtx.resume(); } catch {}
-  player.pause(); freeUrl(); stopListening(); speaking = true; setState("speaking", "falando"); animateBars(true);
-  if (TOKEN && Date.now() > serverVoiceOffUntil) {
-    try {
-      const r = await fetch(`/tts?token=${T()}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: t }) });
-      if (!r.ok) throw new Error("tts " + r.status);
-      const { id: job } = await r.json();
-      if (id !== sayId) return;                       // chegou outra fala no meio: descarta esta
-      playingUrl = `/tts/${job}?token=${T()}`;          // o navegador toca enquanto o áudio ainda chega
-      player.onended = () => { if (id === sayId) { playingUrl = null; doneSpeaking(); } };
-      player.onerror = () => { if (id === sayId) { playingUrl = null; sayBrowser(t); } };
-      player.src = playingUrl;
-      await player.play();
-      return;
-    } catch (e) {
-      if (id !== sayId) return;
-      player.onended = player.onerror = null;              // não deixa o player disparar a fala de reserva de novo
-      if (!(e && e.name === "NotAllowedError")) serverVoiceOffUntil = Date.now() + 5 * 60 * 1000;  // servidor falhou: 5 min na voz do celular
-      freeUrl();
+  try {
+    let ahead = sayQueue.length ? fetchClip(sayQueue[0], gen) : null;
+    while (sayQueue.length && gen === sayGen) {
+      const t = sayQueue.shift();
+      const url = await ahead;
+      if (gen !== sayGen) { if (url) URL.revokeObjectURL(url); break; }
+      ahead = sayQueue.length ? fetchClip(sayQueue[0], gen) : null;
+      lastSaid = (lastSaid + " " + t).trim().slice(-500);
+      await playClip(url, t, gen);
+      if (url && url.startsWith("blob:") && playingUrl !== url) URL.revokeObjectURL(url);
+    }
+  } finally {
+    if (gen === sayGen) {
+      sayBusy = false;
+      if (sayQueue.length) pumpSay();
+      else if (!turnOpen) doneSpeaking();
     }
   }
-  sayBrowser(t);
+}
+function absorbText(chunk) {
+  const c = String(chunk || "").trim();
+  if (!c) return;
+  const plain = s => spoken(shown(s));
+  const all = turnText.join("\n\n").trim();
+  if (!all) { turnText = [c]; return; }
+  const A = plain(all), C = plain(c);
+  if (!C || C === A || A.endsWith(C) || A.startsWith(C)) return;
+  if (C.startsWith(A)) { turnText = [c]; return; }
+  turnText.push(c);
+}
+function speakNew(flush) {
+  const full = spoken(turnText.map(shown).join("\n\n"));
+  if (!full || (voiced && !full.startsWith(voiced))) return;
+  while (full.length > voiced.length) {
+    const fresh = full.slice(voiced.length);
+    if (!fresh.trim()) return;
+    if (!flush) {
+      const m = /[.!?…](?:\s|$)/.exec(fresh);
+      if (!m) return;
+      const piece = fresh.slice(0, m.index + 1).trim();
+      voiced += fresh.slice(0, m.index + m[0].length);
+      if (piece) say(piece);
+    } else {
+      voiced = full;
+      let rest = fresh.trim();
+      while (rest) {
+        let cut = rest.length;
+        if (cut > 220) {
+          const sp = rest.lastIndexOf(" ", 220);
+          cut = sp > 40 ? sp : 220;
+        }
+        const piece = rest.slice(0, cut).trim();
+        rest = rest.slice(cut).trim();
+        if (piece) say(piece);
+      }
+      return;
+    }
+  }
 }
 
 // ---------- escuta contínua enquanto a página está aberta: "ei, Simba" ----------
@@ -636,7 +738,11 @@ function dispatch(cmd) {
   sendMessage(cmd);
 }
 function handleUtterance(t) {
-  const n = norm(t), rest = afterWake(t), woke = rest !== null;
+  const n = norm(t);
+  if (n && n === lastHeard && Date.now() - lastHeardAt < 2000) return;
+  lastHeard = n; lastHeardAt = Date.now();
+  if (Date.now() < echoUntil && lastSaid && n.length > 10 && norm(lastSaid).includes(n)) return;
+  const rest = afterWake(t), woke = rest !== null;
   if (pendingApproval) {
     const tail = woke ? norm(rest) : n;
     if (YES.test(tail)) return answerApproval(true);
@@ -679,12 +785,14 @@ function showSaid(t) { const s = $("#said"); s.textContent = t; s.classList.togg
 const online = () => ws && ws.readyState === 1;
 function send(o) { if (online()) ws.send(JSON.stringify(o)); else if (o.type === "message") outbox.push(o); }
 function sendMessage(text) {
+  silenceNow(); turnOpen = true; voiced = ""; turnText = []; lastSaid = "";
   $("#heard").textContent = "› " + text; send({ type: "message", text });
   setState("thinking", online() ? "processando" : "sem conexão · envio ao reconectar");
 }
 function rejectToken() { store.del("st"); TOKEN = ""; outbox = []; showLogin(); setState(null, "código recusado"); }
 function connect() {
   if (!TOKEN) return showLogin();
+  if (ws) { ws.onmessage = null; try { ws.close(); } catch {} }
   const sock = ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?token=${T()}&device=${DEVICE}`);
   let opened = false;
   sock.onopen = () => {
@@ -704,15 +812,21 @@ function connect() {
   ws.onmessage = e => {
     const ev = JSON.parse(e.data);
     switch (ev.type) {
-      case "status": { const miss = Object.entries(ev.google || {}).filter(([, v]) => !v.ok).map(([c]) => c); setupNotice(miss); break; }
-      case "user": turnText = []; if (ev.device !== DEVICE) $("#heard").textContent = `› (${ev.device}) ${ev.text.slice(0, 120)}`;
+      case "status": { const miss = Object.entries(ev.google || {}).filter(([, v]) => !v.ok).map(([c]) => c); setupNotice(miss, ev.telegram); break; }
+      case "user":
+        turnOpen = true;
+        if (ev.device !== DEVICE) { silenceNow(); voiced = ""; lastSaid = ""; }
+        turnText = [];
+        if (ev.device !== DEVICE) $("#heard").textContent = `› (${ev.device}) ${ev.text.slice(0, 120)}`;
         setState("thinking", ev.device === "proativo" ? "agindo por conta própria" : ev.device === "rotina" ? "rotina" : "processando"); break;
       case "agent": agentState(ev.id, ev.state === "working", ev.task); break;
       case "tool": $("#stateTxt").textContent = ev.name.replace(/_/g, " "); break;
-      case "text": turnText.push(ev.text); showSaid(turnText.map(shown).join("\n\n")); break;
+      case "text": absorbText(ev.text); showSaid(turnText.map(shown).join("\n\n")); if (turnOpen) speakNew(false); break;
       case "done": {
-        setState(null, "online"); document.querySelectorAll(".ag.on").forEach(d => agentState(d.id.slice(3), false));
-        const full = turnText.join("\n\n").trim(); turnText = []; if (full) say(full); loadPanel(); break;
+        turnOpen = false; speakNew(true); turnText = []; voiced = "";
+        document.querySelectorAll(".ag.on").forEach(d => agentState(d.id.slice(3), false));
+        if (!sayBusy && !sayQueue.length) doneSpeaking();
+        loadPanel(); break;
       }
       case "approval": pendingApproval = ev.id; document.body.classList.add("alert");
         alertBox("", ev.id, "Autorização · diga sim ou não", ev.prompt, true);
@@ -722,7 +836,7 @@ function connect() {
       case "suggestion": alertBox("info", ev.id, ev.auto ? "Iniciativa" : "Sugestão", `${ev.titulo}. ${ev.motivo || ""}`, false);
         say(`Senhor, ${ev.titulo}. ${ev.auto ? "Já estou cuidando disso." : ""}`); break;
       case "reminder": alertBox("info", "r" + ev.id + "-" + Date.now(), "Lembrete", ev.motivo, false); say("Lembrete: " + ev.motivo); break;
-      case "error": setState(null, "falha: " + ev.text.slice(0, 50)); break;
+      case "error": turnOpen = false; setState(null, "falha: " + ev.text.slice(0, 50)); if (!sayBusy && !sayQueue.length) doneSpeaking(); break;
     }
   };
 }
@@ -751,14 +865,52 @@ function showLogin() {
   $("#wake").classList.add("show"); $("#wake").onclick = null;
   $("#login").onsubmit = e => { e.preventDefault(); TOKEN = $("#tk").value.trim(); store.set("st", TOKEN); connect(); activate(); };
 }
-function setupNotice(miss) {
+let tgShown = "";
+function setupNotice(miss, tg) {
   document.getElementById("al-google")?.remove();
-  if (!miss.length) return;
-  const d = document.createElement("div"); d.className = "alert info"; d.id = "al-google";
-  d.innerHTML = `<span class="label">Configuração única</span><div class="body">Conecte as contas Google (só uma vez):</div><div class="row"></div>`;
-  for (const c of miss) { const b = document.createElement("button"); b.textContent = c.toUpperCase();
-    b.onclick = () => location.href = `/google/connect?conta=${c}&token=${T()}`; d.querySelector(".row").append(b); }
-  $("#alerts").append(d);
+  if (miss.length) {
+    const d = document.createElement("div"); d.className = "alert info"; d.id = "al-google";
+    d.innerHTML = `<span class="label">Configuração única</span><div class="body">Conecte as contas Google (só uma vez):</div><div class="row"></div>`;
+    for (const c of miss) { const b = document.createElement("button"); b.textContent = c.toUpperCase();
+      b.onclick = () => location.href = `/google/connect?conta=${c}&token=${T()}`; d.querySelector(".row").append(b); }
+    $("#alerts").append(d);
+  }
+  const tgKey = !tg || tg.ok ? "" : (tg.configured ? "code:" + (tg.username || "") : "token");
+  if (tgKey === tgShown && (tgKey === "" || document.getElementById("al-telegram"))) return;
+  tgShown = tgKey;
+  document.getElementById("al-telegram")?.remove();
+  if (!tgKey) return;
+  const d = document.createElement("div"); d.className = "alert info"; d.id = "al-telegram";
+  const label = document.createElement("span"); label.className = "label"; label.textContent = "Telegram";
+  const body = document.createElement("div"); body.className = "body";
+  const row = document.createElement("div"); row.className = "row";
+  const input = document.createElement("input");
+  const btn = document.createElement("button");
+  if (!tg.configured) {
+    body.textContent = "No @BotFather, envie /newbot e cole aqui o token.";
+    input.type = "password"; input.autocomplete = "off"; input.placeholder = "token do bot";
+    btn.textContent = "SALVAR";
+    btn.onclick = async () => {
+      btn.disabled = true;
+      const r = await fetch(`/telegram/token?token=${T()}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bot_token: input.value.trim() }) });
+      const data = await r.json().catch(() => ({}));
+      btn.disabled = false;
+      if (!r.ok) { body.textContent = data.detail || "não aceito"; return; }
+      body.textContent = "Token aceito. Abra o bot e toque em Iniciar.";
+    };
+  } else {
+    body.textContent = `Abra ${tg.username ? "@" + tg.username : "o bot"} no Telegram, toque em Iniciar e digite o código.`;
+    input.inputMode = "numeric"; input.maxLength = 8; input.placeholder = "000000"; input.autocomplete = "one-time-code";
+    btn.textContent = "LIGAR";
+    btn.onclick = async () => {
+      btn.disabled = true;
+      const r = await fetch(`/telegram/confirm?token=${T()}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ codigo: input.value.trim() }) });
+      const data = await r.json().catch(() => ({}));
+      btn.disabled = false;
+      if (!r.ok) body.textContent = data.detail || "código não aceito";
+    };
+  }
+  row.append(input, btn); d.append(label, body, row); $("#alerts").append(d);
 }
 
 // ---------- notificações push ----------

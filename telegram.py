@@ -11,7 +11,7 @@ diga ao SIMBA no app "o código do Telegram é 123456". Só quem tem acesso ao a
 então ninguém mais consegue se ligar ao seu SIMBA pelo Telegram. Mensagens de outros chats são ignoradas.
 
 Sem TELEGRAM_BOT_TOKEN nada disto faz coisa alguma."""
-import asyncio, hashlib, hmac, html, json, mimetypes, os, re, secrets, time, uuid
+import asyncio, hashlib, hmac, html, json, mimetypes, os, re, secrets, ssl, time, uuid
 import urllib.error, urllib.request
 from pathlib import Path
 from claude_agent_sdk import tool, create_sdk_mcp_server
@@ -22,6 +22,8 @@ from . import life
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 STATE = DATA / "telegram.json"
 API = "https://api.telegram.org"
+_bot: dict = {}
+_task: asyncio.Task | None = None
 LIMIT = 3500                       # o Telegram aceita 4096 caracteres por mensagem; sobra folga para a formatação
 CODE_TTL = 15 * 60                 # o código de vínculo vale 15 minutos
 MAX_UPLOAD = 49 * 1024 * 1024      # bots enviam até 50 MB
@@ -59,12 +61,28 @@ def ready() -> bool:
     return enabled() and chat_id() is not None
 
 
+def snapshot() -> dict:
+    """Estado para o app, sem o id do chat nem o token."""
+    d = _load()
+    return {"configured": enabled(), "ok": ready(), "username": _bot.get("username", ""),
+            "nome": d.get("nome", "") if ready() else ""}
+
+
 def setup(hub, run):
     """Chamado pelo servidor ao iniciar: hub (aprovações, sugestões) e a função que executa um pedido."""
     _ctx.update(hub=hub, run=run)
 
 
 # ---------- API do Telegram (síncrona: chame numa thread) ----------
+def _ssl_context() -> ssl.SSLContext:
+    """O certificado padrão do Python no Windows não completa a cadeia do Telegram. O certifi completa."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
 def _call(method: str, params: dict | None = None, files: dict | None = None, timeout: float = 30) -> dict:
     """Devolve o JSON do Telegram, também em caso de erro ({"ok": False, "description": ...}).
     Nunca registra a URL, porque ela contém o token."""
@@ -89,7 +107,7 @@ def _call(method: str, params: dict | None = None, files: dict | None = None, ti
         req = urllib.request.Request(url, data=json.dumps(params or {}, ensure_ascii=False).encode(),
                                      headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as r:
             return json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
         try:
@@ -101,7 +119,7 @@ def _call(method: str, params: dict | None = None, files: dict | None = None, ti
 
 
 def _fetch_file(file_path: str) -> bytes:
-    with urllib.request.urlopen(f"{API}/file/bot{TOKEN}/{file_path}", timeout=60) as r:
+    with urllib.request.urlopen(f"{API}/file/bot{TOKEN}/{file_path}", timeout=60, context=_ssl_context()) as r:
         return r.read()
 
 
@@ -300,6 +318,105 @@ async def setup_webhook():
     r = await asyncio.to_thread(_call, "setWebhook", {"url": base + "/telegram/webhook", "secret_token": webhook_secret(),
                                                       "allowed_updates": ["message", "callback_query"]})
     print("[telegram] webhook " + ("ativo" if r.get("ok") else f"falhou: {str(r.get('description', ''))[:160]}"))
+
+
+def spawn():
+    """Sobe a escuta. Se já houver uma, troca pela nova (por exemplo, depois de salvar o token)."""
+    global _task
+    if _task and not _task.done():
+        _task.cancel()
+    _task = asyncio.get_running_loop().create_task(listen())
+
+
+async def stop():
+    if _task and not _task.done():
+        _task.cancel()
+        try:
+            await _task
+        except asyncio.CancelledError:
+            pass
+
+
+async def listen():
+    """Na nuvem, webhook. No PC, long polling: o Telegram não entrega webhook em http://localhost."""
+    if not enabled():
+        print("[telegram] sem TELEGRAM_BOT_TOKEN")
+        return
+    me = await asyncio.to_thread(_call, "getMe")
+    if not me.get("ok"):
+        print("[telegram] token recusado: " + str(me.get("description", ""))[:120])
+        return
+    _bot["username"] = (me.get("result") or {}).get("username", "")
+    print(f"[telegram] bot @{_bot['username']}")
+    if public_url().startswith("https://"):
+        await setup_webhook()
+        return
+    await asyncio.to_thread(_call, "deleteWebhook", {})
+    print("[telegram] escuta local ativa")
+    offset = int(_load().get("update_offset") or 0)
+    while True:
+        r = await asyncio.to_thread(_call, "getUpdates", {
+            "offset": offset, "timeout": 10,
+            "allowed_updates": ["message", "callback_query"],
+        }, timeout=20)
+        if not r.get("ok"):
+            desc = str(r.get("description", ""))[:160]
+            print(f"[telegram] getUpdates: {desc}")
+            if "webhook" in desc.lower():
+                await asyncio.to_thread(_call, "deleteWebhook", {})
+            await asyncio.sleep(5)
+            continue
+        got = r.get("result") or []
+        for u in got:
+            offset = int(u["update_id"]) + 1
+            await handle_update(u)
+        if got:
+            d = _load()
+            d["update_offset"] = offset
+            _save(d)
+
+
+def _store_token(value: str):
+    """Grava o token no .env do pacote e passa a usá-lo neste processo. Não registra o valor."""
+    global TOKEN
+    env = Path(__file__).resolve().parent / ".env"
+    lines = env.read_text(encoding="utf-8").splitlines() if env.is_file() else []
+    out, found = [], False
+    for line in lines:
+        if line.startswith("TELEGRAM_BOT_TOKEN="):
+            out.append("TELEGRAM_BOT_TOKEN=" + value)
+            found = True
+        else:
+            out.append(line)
+    if not found:
+        if out and out[-1].strip():
+            out.append("")
+        out.append("TELEGRAM_BOT_TOKEN=" + value)
+    env.write_text("\n".join(out) + "\n", encoding="utf-8")
+    TOKEN = value
+    os.environ["TELEGRAM_BOT_TOKEN"] = value
+
+
+async def save_bot_token(value: str) -> str:
+    """Confere o token com o Telegram antes de gravar. Devolve o @ do bot."""
+    global TOKEN
+    value = (value or "").strip()
+    if value.count(":") != 1 or len(value) < 30:
+        raise ValueError("esse token não tem o formato que o @BotFather entrega")
+    old = TOKEN
+    TOKEN = value
+    me = await asyncio.to_thread(_call, "getMe")
+    if not me.get("ok"):
+        TOKEN = old
+        if old:
+            os.environ["TELEGRAM_BOT_TOKEN"] = old
+        else:
+            os.environ.pop("TELEGRAM_BOT_TOKEN", None)
+        raise ValueError("o Telegram recusou esse token. Confira o que o @BotFather mostrou.")
+    _store_token(value)
+    _bot["username"] = (me.get("result") or {}).get("username", "")
+    spawn()
+    return _bot["username"]
 
 
 async def _say(text: str, chat: int, buttons: list | None = None):

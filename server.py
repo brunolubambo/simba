@@ -68,7 +68,8 @@ def status() -> dict:
     ok = google.authorized()
     return {"type": "status", "devices": hub.devices(), "observer": state["observer"].enabled,
             "observer_available": state["observer"].available,
-            "google": {c: {"email": e, "ok": c in ok} for c, e in ACCOUNTS.items()}}
+            "google": {c: {"email": e, "ok": c in ok} for c, e in ACCOUNTS.items()},
+            "telegram": telegram.snapshot()}
 
 
 @asynccontextmanager
@@ -81,12 +82,14 @@ async def lifespan(app):
     state["observer"] = Observer(hub)
     telegram.setup(hub, run_and_broadcast)
     hub.mirror = telegram.notify
+    telegram.spawn()
     bg = [asyncio.create_task(c) for c in (
         state["simba"].warm(), state["observer"].run(), tasks.reminders_loop(hub), tasks.routines_loop(run_and_broadcast),
-        tasks.mail_loop(hub), tasks.calendar_loop(hub), telegram.setup_webhook())]
+        tasks.mail_loop(hub), tasks.calendar_loop(hub))]
     yield
     for t in bg:
         t.cancel()
+    await telegram.stop()
     await state["simba"].stop()
 
 
@@ -263,6 +266,30 @@ def push_subscribe(sub: dict = Body(...), token: str = Query("")):
     check(token)
     save_sub(sub)
     return {"ok": True}
+
+
+@app.post("/telegram/token")
+async def telegram_token(body: dict = Body(...), token: str = Query("")):
+    """Guarda o token do @BotFather depois de o Telegram aceitar. Não devolve o token."""
+    check(token)
+    try:
+        username = await telegram.save_bot_token(str(body.get("bot_token", "")))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    await hub.broadcast(status())
+    return {"ok": True, "username": username}
+
+
+@app.post("/telegram/confirm")
+async def telegram_confirm(body: dict = Body(...), token: str = Query("")):
+    """Liga o chat com o código de 6 dígitos que o bot mostrou no /start."""
+    check(token)
+    try:
+        text = await asyncio.to_thread(telegram.confirm, str(body.get("codigo", "")))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    await hub.broadcast(status())
+    return {"ok": True, "text": text}
 
 
 @app.post("/telegram/webhook")
