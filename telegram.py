@@ -4,6 +4,7 @@ e também recebe pedidos, fotos e arquivos por lá.
 Variáveis (Railway → Variables):
   TELEGRAM_BOT_TOKEN   token que o @BotFather entrega ao criar o bot (obrigatório)
   TELEGRAM_CHAT_ID     opcional: fixa o chat à mão (normalmente o vínculo é feito pelo código abaixo)
+  TELEGRAM_LISTEN      "true" (padrão) lê o bot; "false" só envia, não consome updates
   SIMBA_PUSH_TAMBEM    opcional: "true" para receber a notificação do app além do Telegram
 
 Vínculo (uma vez só): abra o bot no Telegram e toque em Iniciar. O bot responde com um código de 6 dígitos;
@@ -20,6 +21,7 @@ from .toolkit import schema, safe
 from . import life
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+LISTEN = os.getenv("TELEGRAM_LISTEN", "true").lower() == "true"   # false = pode enviar, mas não chama getUpdates/webhook
 STATE = DATA / "telegram.json"
 API = "https://api.telegram.org"
 _bot: dict = {}
@@ -325,6 +327,9 @@ def spawn():
     global _task
     if _task and not _task.done():
         _task.cancel()
+    if not LISTEN:
+        print("[telegram] escuta desligada")
+        return
     _task = asyncio.get_running_loop().create_task(listen())
 
 
@@ -339,6 +344,8 @@ async def stop():
 
 async def listen():
     """Na nuvem, webhook. No PC, long polling: o Telegram não entrega webhook em http://localhost."""
+    if not LISTEN:
+        return
     if not enabled():
         print("[telegram] sem TELEGRAM_BOT_TOKEN")
         return
