@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SIMBA</string>
+    <string name="setup_title">SIMBA</string>
+    <string name="setup_body">Ele fica ouvindo em segundo plano. Depois de ativar, pode sair desta tela e dizer “ei, Simba”.</string>
+    <string name="url_hint">Endereço do servidor</string>
+    <string name="token_hint">Código de acesso</string>
+    <string name="start">Ativar escuta</string>
+    <string name="listening_note">Escuta ligada. O Android mostra um aviso permanente porque o microfone está aberto. Não precisa deixar este aplicativo na tela.</string>
+    <string name="notification_title">SIMBA ouvindo</string>
+    <string name="notification_text">Diga “ei, Simba”</string>
+    <string name="notification_stop">Parar</string>
+    <string name="channel_name">Escuta do SIMBA</string>
+    <string name="session_listening">Ouvindo</string>
+    <string name="no_server">Configure o servidor antes de ativar.</string>
+    <string name="no_mic">O celular não tem reconhecimento de voz.</string>
+</resources>

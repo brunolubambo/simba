@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true"
+    android:background="@color/codata_navy">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="28dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/setup_title"
+            android:textColor="@color/white"
+            android:textSize="28sp"
+            android:letterSpacing="0.2" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/setup_body"
+            android:textColor="@color/white"
+            android:textSize="16sp" />
+
+        <EditText
+            android:id="@+id/url"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="28dp"
+            android:background="@drawable/field"
+            android:hint="@string/url_hint"
+            android:inputType="textUri"
+            android:padding="14dp"
+            android:textColor="@color/white"
+            android:textColorHint="#B3FFFFFF" />
+
+        <EditText
+            android:id="@+id/token"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/field"
+            android:hint="@string/token_hint"
+            android:inputType="textPassword"
+            android:padding="14dp"
+            android:textColor="@color/white"
+            android:textColorHint="#B3FFFFFF" />
+
+        <Button
+            android:id="@+id/start"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:background="@drawable/button_bg"
+            android:backgroundTint="@null"
+            android:text="@string/start"
+            android:textColor="@color/white" />
+
+        <TextView
+            android:id="@+id/status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:textColor="@color/white"
+            android:textSize="15sp" />
+    </LinearLayout>
+</ScrollView>

@@ -1,18 +1,16 @@
-"""Controle do celular Android (Galaxy A33 5G, One UI 8) pelo Tasker.
+"""Controle do celular Android (Galaxy A33 5G, One UI 8) pelo app SIMBA.
 
-O SIMBA manda um push pelo Firebase Cloud Messaging; o Tasker executa e DEVOLVE o resultado
-em POST /celular/resultado (ou a foto em POST /celular/foto). Enquanto essa confirmação não
-chega, a ferramenta não diz que executou.
+O servidor guarda o comando; o app busca em GET /celular/proximo e confirma em
+POST /celular/resultado (ou a foto em POST /celular/foto). Sem essa confirmação
+a ferramenta não diz que executou. Tasker e Firebase no telefone não são necessários.
 
 Variáveis (Railway → Variables):
-  FCM_PROJECT_ID        id do projeto no Google Cloud (obrigatório)
-  FCM_SERVICE_ACCOUNT   JSON da conta de serviço, ou o caminho de um arquivo no volume (obrigatório)
-  CELULAR_FCM_TOKEN     token do aparelho, em Tasker → Preferências → MISC (obrigatório)
-  CELULAR_TOKEN         token que o Tasker manda de volta (se vazio, usa SIMBA_TOKEN)
-  CELULAR_TASK          nome da tarefa no Tasker (padrão: SimbaComando)
+  CELULAR_APP           true (padrão) liga a ferramenta sem Firebase
+  CELULAR_TOKEN         token que o app manda de volta (se vazio, usa SIMBA_TOKEN)
   CELULAR_TIMEOUT_S     segundos de espera pela confirmação (padrão: 20)
+  FCM_PROJECT_ID / FCM_SERVICE_ACCOUNT / CELULAR_FCM_TOKEN  opcionais, só se quiser push
 
-Sem as três primeiras a ferramenta não é registrada. Guia: celular-tasker.md."""
+Guia: celular-tasker.md."""
 import asyncio, json, os, re, secrets, ssl, urllib.error, urllib.request
 from pathlib import Path
 from claude_agent_sdk import tool, create_sdk_mcp_server
@@ -35,9 +33,17 @@ ACOES: dict[str, tuple[str, ...]] = {
     "foto": ("camera",),
 }
 LIVRES = {"alarme", "abrir_app"}
-_pending: dict[str, asyncio.Future] = {}
+
+class Job:
+    def __init__(self, fut: asyncio.Future, dados: dict):
+        self.fut = fut
+        self.dados = dados
+        self.claimed = False
+
+_jobs: dict[str, Job] = {}
 _creds = None
 _sa = None
+APP = os.getenv("CELULAR_APP", "true").lower() in ("1", "true", "yes", "on")
 
 
 def _project_id() -> str:
@@ -51,8 +57,13 @@ def _project_id() -> str:
         return ""
 
 
-def enabled() -> bool:
+def _fcm_pronto() -> bool:
     return bool(CREDENTIAL and DEVICE and _project_id())
+
+
+def enabled() -> bool:
+    """O app Android busca o comando sozinho. Firebase/Tasker é opcional."""
+    return APP or _fcm_pronto()
 
 
 def verdade(v) -> bool:
@@ -62,7 +73,7 @@ def verdade(v) -> bool:
 
 
 def token_ok(token: str) -> bool:
-    """O retorno do Tasker usa CELULAR_TOKEN, ou o SIMBA_TOKEN se aquele estiver vazio."""
+    """O retorno do app usa CELULAR_TOKEN, ou o SIMBA_TOKEN se aquele estiver vazio."""
     expected = os.getenv("CELULAR_TOKEN", "").strip() or os.getenv("SIMBA_TOKEN", "").strip()
     return bool(expected) and bool(token) and secrets.compare_digest(token, expected)
 
@@ -153,7 +164,7 @@ def _push(dados: dict):
         except Exception:
             pass
         if e.code in (400, 404) or detalhe == "UNREGISTERED":
-            raise RuntimeError("o Firebase não reconhece mais este aparelho; o token do Tasker precisa ser atualizado")
+            raise RuntimeError("o Firebase não reconhece mais este aparelho; o token FCM precisa ser atualizado")
         raise RuntimeError(f"o Firebase recusou o envio (HTTP {e.code})")
     except Exception as e:
         raise RuntimeError(f"não consegui falar com o Firebase ({type(e).__name__})") from None
@@ -161,44 +172,54 @@ def _push(dados: dict):
 
 def report(cmd: str, sucesso: bool, detalhe: str = "") -> bool:
     """Chamado pelas rotas de retorno. False se o comando já expirou."""
-    fut = _pending.pop(cmd, None)
-    if fut is None or fut.done():
+    job = _jobs.pop(cmd, None)
+    if job is None or job.fut.done():
         return False
-    fut.get_loop().call_soon_threadsafe(fut.set_result, (sucesso, detalhe))
+    job.fut.get_loop().call_soon_threadsafe(job.fut.set_result, (sucesso, detalhe))
     return True
+
+
+def proximo() -> dict | None:
+    """O app puxa o próximo comando. Sem isso o Firebase/Tasker não é necessário."""
+    for cmd, job in _jobs.items():
+        if not job.claimed and not job.fut.done():
+            job.claimed = True
+            return {"id": cmd, **job.dados}
+    return None
 
 
 async def executar(a: dict) -> str:
     dados = _prepara(a)
     acao = dados["acao"]
     if not enabled():
-        raise RuntimeError("o controle do celular não está configurado (faltam as variáveis do Firebase no Railway)")
-    while len(_pending) >= 20:
-        _, velho = _pending.popitem()
-        velho.cancel()
+        raise RuntimeError("o controle do celular está desligado (CELULAR_APP=false e sem Firebase)")
+    while len(_jobs) >= 20:
+        _, velho = _jobs.popitem()
+        velho.fut.cancel()
     cmd = secrets.token_urlsafe(8)
     fut = asyncio.get_running_loop().create_future()
-    _pending[cmd] = fut
+    _jobs[cmd] = Job(fut, dados)
     try:
-        await asyncio.to_thread(_push, {**dados, "cmd": cmd})
+        if _fcm_pronto():
+            await asyncio.to_thread(_push, {**dados, "cmd": cmd})
         sucesso, detalhe = await asyncio.wait_for(fut, WAIT)
     except asyncio.TimeoutError:
         print(f"[celular] {acao}: sem resposta do aparelho")
         raise RuntimeError(
             "o comando foi enviado mas o celular não confirmou, então NÃO foi executado. "
-            "Verifique se o aparelho está ligado e com internet, e se o Tasker não foi suspenso pela bateria") from None
+            "Deixe o app SIMBA ouvindo, com internet, e sem hibernação da bateria") from None
     except asyncio.CancelledError:
         raise
     except RuntimeError:
         raise
     except Exception as e:
         print(f"[celular] {acao}: falha ao enviar")
-        raise RuntimeError(f"não consegui enviar o comando ao celular ({type(e).__name__})") from None
+        raise RuntimeError(f"não consegui falar com o celular ({type(e).__name__})") from None
     finally:
-        _pending.pop(cmd, None)
+        _jobs.pop(cmd, None)
     print(f"[celular] {acao}: {'ok' if sucesso else 'erro'}")
     if not sucesso:
-        raise RuntimeError(f"o celular recebeu o comando e não conseguiu executar: {detalhe or 'o Tasker não disse o motivo'}")
+        raise RuntimeError(f"o celular recebeu o comando e não conseguiu executar: {detalhe or 'o app não disse o motivo'}")
     extra = f" {detalhe}" if detalhe else ""
     if acao == "foto" and detalhe:
         extra = f" Imagem em {detalhe}. Leia com Read."
@@ -206,7 +227,7 @@ async def executar(a: dict) -> str:
 
 
 @tool("celular_acao",
-      "Executa uma ação no celular Android do Bruno pelo Tasker. Ações: 'alarme' (hora HH:MM, etiqueta opcional), "
+      "Executa uma ação no celular Android do Bruno pelo app SIMBA. Ações: 'alarme' (hora HH:MM, etiqueta opcional), "
       "'abrir_app' (app: o nome como aparece no celular) e 'foto' (camera frontal ou traseira; a imagem chega no "
       "workspace para você ler com Read). Só responde sucesso quando o próprio celular confirma; se devolver erro, "
       "a ação NÃO aconteceu e você não deve dizer que aconteceu. Compromissos: use agenda_criar, que já aparece no "

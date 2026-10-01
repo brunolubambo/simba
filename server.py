@@ -4,7 +4,7 @@ WebSocket /ws?token=...&device=pc|celular
   saída:   text | tool | done | approval | approval_closed | suggestion | activity | status | error
 HTTP: POST /upload?token= (imagem do celular, ex.: Atalho do iOS) | POST /push/subscribe | GET /push/key
       POST /tts?token= ({text} -> {id}) + GET /tts/{id}?token= (voz neural em MP3, transmitida) | POST /telegram/webhook (mensagens do bot, ver telegram.py)
-      POST /celular/resultado?token= e POST /celular/foto?token=&id= (o Tasker confirma um comando, ver celular.py)"""
+      POST /celular/resultado?token= , GET /celular/proximo?token= e POST /celular/foto?token=&id= (o app confirma um comando, ver celular.py)"""
 import asyncio, json, os, re, secrets, time
 from datetime import date
 from contextlib import asynccontextmanager
@@ -174,10 +174,20 @@ async def _celular_campos(request: Request, id: str, ok: str, detalhe: str) -> t
     return cmd, sucesso, nota
 
 
+@app.get("/celular/proximo")
+def celular_proximo(token: str = Query("")):
+    """O app SIMBA puxa o próximo comando. 204 = nada a fazer."""
+    _check_celular(token)
+    pedido = celular.proximo()
+    if not pedido:
+        return Response(status_code=204)
+    return pedido
+
+
 @app.post("/celular/resultado")
 async def celular_resultado(request: Request, token: str = Query(""),
                             id: str = Query(""), ok: str = Query(""), detalhe: str = Query("")):
-    """O Tasker avisa como terminou um comando. Sem este POST o SIMBA não considera a ação feita."""
+    """O app avisa como terminou um comando. Sem este POST o SIMBA não considera a ação feita."""
     _check_celular(token)
     cmd, sucesso, nota = await _celular_campos(request, id, ok, detalhe)
     if not cmd:
@@ -187,7 +197,7 @@ async def celular_resultado(request: Request, token: str = Query(""),
 
 @app.post("/celular/foto")
 async def celular_foto(request: Request, token: str = Query(""), id: str = Query("")):
-    """O Tasker envia a foto tirada. Completa o comando `foto` com o caminho no workspace."""
+    """O app envia a foto tirada. Completa o comando `foto` com o caminho no workspace."""
     _check_celular(token)
     cmd = id.strip()
     if not cmd:

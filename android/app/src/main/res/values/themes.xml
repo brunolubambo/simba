@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Simba" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@color/codata_navy</item>
+        <item name="android:statusBarColor">@color/codata_navy</item>
+        <item name="android:navigationBarColor">@color/codata_navy</item>
+        <item name="colorPrimary">@color/codata_blue</item>
+        <item name="colorAccent">@color/codata_blue</item>
+        <item name="android:textColor">@color/white</item>
+        <item name="android:textColorHint">#B3FFFFFF</item>
+    </style>
+</resources>
