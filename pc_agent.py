@@ -601,6 +601,7 @@ def main(argv: list[str] | None = None):
     try:
         from dotenv import load_dotenv
         load_dotenv()
+        load_dotenv(Path(__file__).resolve().parent / ".env")
     except ImportError:
         pass
     args = list(sys.argv[1:] if argv is None else argv)
