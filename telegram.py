@@ -4,6 +4,8 @@ e também recebe pedidos, fotos e arquivos por lá.
 Variáveis (Railway → Variables):
   TELEGRAM_BOT_TOKEN   token que o @BotFather entrega ao criar o bot (obrigatório)
   TELEGRAM_CHAT_ID     opcional: fixa o chat à mão (normalmente o vínculo é feito pelo código abaixo)
+  TELEGRAM_LISTEN      "true" escuta as mensagens; "false" só envia. Padrão: escuta só com endereço https (nuvem).
+                       Rode "false" no PC para ele não roubar o webhook do Railway.
   SIMBA_PUSH_TAMBEM    opcional: "true" para receber a notificação do app além do Telegram
 
 Vínculo (uma vez só): abra o bot no Telegram e toque em Iniciar. O bot responde com um código de 6 dígitos;
@@ -337,6 +339,17 @@ async def stop():
             pass
 
 
+def escutar() -> bool:
+    """Só UMA instância deve receber as mensagens do bot. TELEGRAM_LISTEN=true/false decide;
+    sem a variável, escuta apenas quem tem endereço https (a nuvem). O PC local só envia."""
+    v = os.getenv("TELEGRAM_LISTEN", "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return public_url().startswith("https://")
+
+
 async def listen():
     """Na nuvem, webhook. No PC, long polling: o Telegram não entrega webhook em http://localhost."""
     if not enabled():
@@ -348,6 +361,9 @@ async def listen():
         return
     _bot["username"] = (me.get("result") or {}).get("username", "")
     print(f"[telegram] bot @{_bot['username']}")
+    if not escutar():
+        print("[telegram] esta instância só ENVIA (TELEGRAM_LISTEN desligado); não escuta nem mexe no webhook")
+        return
     if public_url().startswith("https://"):
         await setup_webhook()
         return
