@@ -1,6 +1,6 @@
 """Agente local do PC pessoal: puxa comandos do SIMBA por HTTPS de saída.
 
-Corre como o utilizador, sem admin, sem porta de entrada. Só Documentos e Ambiente de trabalho
+Corre como o utilizador, sem admin, sem porta de entrada. Só a pasta Ambiente de trabalho (pasta simba-pc)
 (mais PC_ALLOW_DIRS). Nunca o PC da CODATA.
 
   python -m simba.pc_agent
@@ -8,10 +8,10 @@ Corre como o utilizador, sem admin, sem porta de entrada. Só Documentos e Ambie
   python -m simba.pc_agent on
   python -m simba.pc_agent self-test
 
-Variáveis locais (.env, sem valores no git): SIMBA_URL, PC_TOKEN (ou SIMBA_TOKEN),
+Variáveis locais (.env, sem valores no git): SIMBA_URL, PC_TOKEN (obrigatório, 32+ caracteres),
 PC_ALLOW_DIRS, PC_ENABLED, PC_KILL_FILE."""
 from __future__ import annotations
-import json, os, ssl, subprocess, sys, time, urllib.error, urllib.request
+import json, os, shutil, ssl, subprocess, sys, time, urllib.error, urllib.request
 from pathlib import Path
 
 try:
@@ -46,8 +46,8 @@ def _ssl():
         return ssl.create_default_context()
 
 
-def _bool(nome: str, padrao: str = "true") -> bool:
-    return os.getenv(nome, padrao).lower() in ("1", "true", "yes", "on")
+def _bool(nome: str, padrao: str = "false") -> bool:
+    return os.getenv(nome, padrao).strip().lower() == "true"
 
 
 def kill_file() -> Path:
@@ -66,6 +66,7 @@ def _pasta_conhecida(csidl: int) -> Path | None:
 
 
 def raizes() -> list[Path]:
+    """Pasta padrão: só Desktop\\simba-pc. O resto, só por PC_ALLOW_DIRS."""
     docs = _pasta_conhecida(5) or Path.home() / "Documents"
     if not docs.is_dir():
         alt = Path.home() / "Documentos"
@@ -78,7 +79,12 @@ def raizes() -> list[Path]:
             if alt.is_dir():
                 desk = alt
                 break
-    out = [docs, desk]
+    base = desk / "simba-pc"
+    try:
+        base.mkdir(exist_ok=True)
+    except OSError:
+        pass
+    out = [base]
     extra = os.getenv("PC_ALLOW_DIRS", "").strip()
     for raw in extra.replace("|", ";").split(";"):
         s = raw.strip().strip('"')
@@ -178,7 +184,7 @@ def _componentes_ok(alvo: Path, bases: list[Path]) -> None:
             pai_r = pai
         raiz = next((br for br in bases_r if _dentro_real(pai_r, br)), None)
     if raiz is None:
-        raise ValueError("fora das pastas permitidas (Documentos e Ambiente de trabalho)")
+        raise ValueError("fora das pastas permitidas (Desktop\\simba-pc)")
     try:
         rel = check.relative_to(raiz)
     except ValueError:
@@ -195,13 +201,9 @@ def _componentes_ok(alvo: Path, bases: list[Path]) -> None:
 
 
 def aliases() -> dict[str, Path]:
-    r = raizes()
-    docs, desk = r[0], r[1]
-    return {
-        "documentos": docs, "documents": docs, "docs": docs,
-        "desktop": desk, "ambiente de trabalho": desk, "area de trabalho": desk,
-        "área de trabalho": desk,
-    }
+    base = raizes()[0]
+    return {k: base for k in ("simba-pc", "documentos", "documents", "docs", "desktop",
+                              "ambiente de trabalho", "area de trabalho", "área de trabalho")}
 
 
 def resolver(pedido: str, *, escrever: bool = False) -> Path:
@@ -225,7 +227,7 @@ def resolver(pedido: str, *, escrever: bool = False) -> Path:
                 return _real(c)
         p = candidatos[1] if len(candidatos) > 1 else candidatos[0]  # Desktop por omissão
         if not _dentro(p if p.exists() else p.parent, bases):
-            raise ValueError("fora das pastas permitidas (Documentos e Ambiente de trabalho)")
+            raise ValueError("fora das pastas permitidas (Desktop\\simba-pc)")
         _componentes_ok(p.parent if not p.exists() else p, bases)
         return p
     pai = p.parent if not p.exists() else p
@@ -237,7 +239,7 @@ def resolver(pedido: str, *, escrever: bool = False) -> Path:
         if not _dentro(anc, bases):
             raise ValueError("fora das pastas permitidas")
     elif not _dentro(pai, bases):
-        raise ValueError("fora das pastas permitidas (Documentos e Ambiente de trabalho)")
+        raise ValueError("fora das pastas permitidas (Desktop\\simba-pc)")
     _componentes_ok(p.parent if not p.exists() else p, bases)
     return _real(p) if p.exists() else p.resolve()
 
@@ -293,12 +295,21 @@ def _ler(path: Path) -> str:
 
 
 def _escrever(path: Path, conteudo: str) -> str:
-    if path.suffix.lower() in pcmod.EXEC_EXT:
-        raise ValueError("não crio executáveis nem scripts")
+    if path.suffix.lower() not in pcmod.PERMITIDAS:
+        raise ValueError("extensão não permitida para escrever")
     pcmod._segredo(str(path))
     path.parent.mkdir(parents=True, exist_ok=True)
     if not _dentro(path.parent, raizes()):
         raise ValueError("pasta-mãe fora da allowlist")
+    aviso = ""
+    if path.exists():
+        if not path.is_file():
+            raise ValueError("o destino não é um ficheiro")
+        bak = path.with_name(path.name + ".bak")
+        if bak.exists() and not bak.is_file():
+            raise ValueError("o .bak é uma pasta")
+        shutil.copy2(path, bak)
+        aviso = f" (o anterior ficou em {bak.name})"
     flags = os.O_CREAT | os.O_WRONLY | os.O_TRUNC
     fd = os.open(str(path), flags, 0o644)
     try:
@@ -308,7 +319,7 @@ def _escrever(path: Path, conteudo: str) -> str:
         os.write(fd, conteudo.encode("utf-8"))
     finally:
         os.close(fd)
-    return f"escrito {path} ({len(conteudo)} caracteres)"
+    return f"escrito {path} ({len(conteudo)} caracteres){aviso}"
 
 
 def _buscar(pasta: Path, q: str) -> str:
@@ -367,8 +378,8 @@ def _abrir_ficheiro(caminho: str) -> str:
     p = resolver(caminho)
     if not p.exists():
         raise ValueError("ficheiro não existe")
-    if p.suffix.lower() in pcmod.EXEC_EXT:
-        raise ValueError("não abro executáveis da pasta; use um app da lista")
+    if p.suffix.lower() not in pcmod.PERMITIDAS:
+        raise ValueError("só abro " + ", ".join(sorted(pcmod.PERMITIDAS)) + "; use um app da lista")
     os.startfile(p)  # type: ignore[attr-defined]
     return f"abri {p}"
 
@@ -432,9 +443,10 @@ def executar(dados: dict) -> str:
 
 
 def _headers() -> dict:
-    token = os.getenv("PC_TOKEN", "").strip() or os.getenv("SIMBA_TOKEN", "").strip()
-    if not token:
-        raise SystemExit("defina PC_TOKEN ou SIMBA_TOKEN no .env (sem pôr o valor no git)")
+    ok, motivo = pcmod.token_config()
+    if not ok:
+        raise SystemExit(motivo + " (no .env, sem pôr o valor no git)")
+    token = os.environ["PC_TOKEN"].strip()
     return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
 
@@ -473,21 +485,76 @@ def self_test() -> int:
             resolver(str(r))
             print("aceitou raiz:", r)
             break
+    # Segurança endurecida (etapa 14): cada caso abaixo TEM de ser recusado.
+    casos = [
+        ("ler data/google", lambda: pcmod._prepara({"acao": "ler", "caminho": r"C:\\x\\data\\google\\pessoal.json"})),
+        ("ler token", lambda: pcmod._prepara({"acao": "ler", "caminho": r"simba-pc\\google_token.json"})),
+        ("ler .git", lambda: pcmod._prepara({"acao": "ler", "caminho": r"simba-pc\\.git\\config"})),
+        ("escrever .py", lambda: pcmod._prepara({"acao": "escrever", "caminho": "a.py", "conteudo": "x"})),
+        ("escrever .hta", lambda: pcmod._prepara({"acao": "escrever", "caminho": "a.hta", "conteudo": "x"})),
+        ("escrever .url", lambda: pcmod._prepara({"acao": "escrever", "caminho": "a.url", "conteudo": "x"})),
+        ("abrir .py", lambda: pcmod._prepara({"acao": "abrir", "caminho": "a.py"})),
+        ("token curto", lambda: _exige(pcmod.token_config({"PC_TOKEN": "curto"}))),
+        ("token vazio", lambda: _exige(pcmod.token_config({"SIMBA_TOKEN": "x" * 40}))),
+        ("token igual", lambda: _exige(pcmod.token_config({"PC_TOKEN": "a" * 40, "SIMBA_TOKEN": "a" * 40}))),
+    ]
+    for nome, f in casos:
+        try:
+            f()
+            print("FALHOU (devia recusar):", nome)
+            falhas += 1
+        except ValueError:
+            print("recusou:", nome)
+    for nome, f in (("escrever .md", lambda: pcmod._prepara({"acao": "escrever", "caminho": "ola.md", "conteudo": "x"})),
+                    ("token bom", lambda: _exige(pcmod.token_config({"PC_TOKEN": "a" * 40, "SIMBA_TOKEN": "b" * 40})))):
+        try:
+            f()
+            print("aceitou (correto):", nome)
+        except ValueError:
+            print("FALHOU (devia aceitar):", nome)
+            falhas += 1
+    # sobrescrever cria .bak
+    import tempfile
+    with tempfile.TemporaryDirectory(dir=str(Path.home())) as t:   # fora do AppData, que é bloqueado de propósito
+        os.environ["PC_ALLOW_DIRS"] = t
+        alvo = Path(t) / "x.txt"
+        alvo.write_text("antigo")
+        try:
+            _escrever(alvo, "novo")
+            ok_bak = (Path(t) / "x.txt.bak").read_text() == "antigo" and alvo.read_text() == "novo"
+        except ValueError as e:
+            ok_bak = False
+            print("erro:", e)
+        print("sobrescrever cria .bak:", "ok" if ok_bak else "FALHOU")
+        falhas += 0 if ok_bak else 1
+    # PC_ENABLED desligado por padrão
+    os.environ.pop("PC_ENABLED", None)
+    if pcmod.env_ligado() or _bool("PC_ENABLED"):
+        print("FALHOU: PC_ENABLED devia vir desligado")
+        falhas += 1
+    else:
+        print("PC_ENABLED desligado por padrão: ok")
     print("kill file:", kill_file())
     return 1 if falhas else 0
+
+
+def _exige(res):
+    if not res[0]:
+        raise ValueError(res[1])
 
 
 def loop():
     if os.name != "nt":
         raise SystemExit("este agente só corre no Windows pessoal")
-    if not _bool("PC_ENABLED", "true"):
-        raise SystemExit("PC_ENABLED=false — agente parado")
+    if not _bool("PC_ENABLED", "false"):
+        raise SystemExit("PC_ENABLED não é \"true\" — agente parado")
+    _headers()   # recusa iniciar sem PC_TOKEN válido
     kf = kill_file()
     if kf.exists():
         raise SystemExit(f"kill switch activo ({kf}). Apague o ficheiro ou rode: python -m simba.pc_agent on")
     print(f"SIMBA PC agente a ouvir {_url()} (Ctrl+C para parar)", flush=True)
     while True:
-        if not _bool("PC_ENABLED", "true") or kf.exists():
+        if not _bool("PC_ENABLED", "false") or kf.exists():
             print("[pc] desligado", flush=True)
             return
         try:
@@ -534,6 +601,7 @@ def main(argv: list[str] | None = None):
     try:
         from dotenv import load_dotenv
         load_dotenv()
+        load_dotenv(Path(__file__).resolve().parent / ".env")
     except ImportError:
         pass
     args = list(sys.argv[1:] if argv is None else argv)

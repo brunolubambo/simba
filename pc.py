@@ -5,8 +5,8 @@ confirma em POST /pc/resultado. Sem essa confirmação a ferramenta não diz que
 Ligação de saída HTTPS; sem porta de entrada; sem Tailscale.
 
 Variáveis (Railway → Variables):
-  PC_ENABLED      true (padrão) liga a ferramenta
-  PC_TOKEN        token do agente (se vazio, usa SIMBA_TOKEN)
+  PC_ENABLED      só liga com o valor exato "true" (padrão: desligado)
+  PC_TOKEN        token só do agente, obrigatório, 32+ caracteres e diferente do SIMBA_TOKEN
   PC_TIMEOUT_S    segundos de espera pela confirmação (padrão: 30)
   PC_ALLOW_DIRS   opcional; eco da política — quem aplica é o agente local
 
@@ -34,6 +34,10 @@ SECRET_NOME = {".env", ".env.local", ".env.production", "credentials.json", "id_
                "id_ecdsa", "secrets.json", ".git-credentials", "token.json"}
 SECRET_EXT = {".pem", ".key", ".pfx", ".p12", ".kdbx", ".ppk"}
 EXEC_EXT = {".exe", ".bat", ".cmd", ".ps1", ".msi", ".vbs", ".js", ".lnk", ".com", ".scr", ".pif", ".reg"}
+PERMITIDAS = {".txt", ".md", ".csv", ".json", ".pdf", ".png", ".jpg", ".docx", ".xlsx"}   # escrever e abrir
+PARTES_BLOQUEADAS = {".git", ".ssh", ".aws", ".gnupg", "appdata"}
+SUBPASTAS_DATA = {"google", "agents", "memory"}      # data\google etc. do próprio SIMBA
+NOME_SENSIVEL = re.compile(r"(?i)(token|credential|secret|client_secret|senha|password)")
 SISTEMA = re.compile(r"(?i)^([a-z]:[\\/])?(windows|program files(?: \(x86\))?|programdata)([\\/]|$)")
 
 class Job:
@@ -48,7 +52,7 @@ _last_poll = 0.0
 
 
 def env_ligado() -> bool:
-    return os.getenv("PC_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+    return os.getenv("PC_ENABLED", "false").strip().lower() == "true"
 
 
 def enabled() -> bool:
@@ -75,9 +79,26 @@ def verdade(v) -> bool:
     return str(v or "").strip().lower() in ("true", "1", "ok", "sim")
 
 
+TOKEN_MIN = 32
+
+
+def token_config(env=None) -> tuple[bool, str]:
+    """O PC_TOKEN existe, tem 32+ caracteres e não é o SIMBA_TOKEN? Devolve (ok, motivo)."""
+    env = os.environ if env is None else env
+    pc_t = str(env.get("PC_TOKEN", "")).strip()
+    if not pc_t:
+        return False, "defina PC_TOKEN (token próprio do agente do PC)"
+    if len(pc_t) < TOKEN_MIN:
+        return False, f"PC_TOKEN curto demais (mínimo {TOKEN_MIN} caracteres)"
+    if pc_t == str(env.get("SIMBA_TOKEN", "")).strip():
+        return False, "PC_TOKEN não pode ser igual ao SIMBA_TOKEN"
+    return True, ""
+
+
 def token_ok(token: str) -> bool:
-    expected = os.getenv("PC_TOKEN", "").strip() or os.getenv("SIMBA_TOKEN", "").strip()
-    return bool(expected) and bool(token) and secrets.compare_digest(token, expected)
+    if not token_config()[0]:
+        return False
+    return bool(token) and secrets.compare_digest(token, os.environ["PC_TOKEN"].strip())
 
 
 def _nome(p: str) -> str:
@@ -115,19 +136,29 @@ def _segredo(p: str) -> None:
     nome, ext = _nome(p), _ext(p)
     if nome in SECRET_NOME or ext in SECRET_EXT or nome.endswith(".key"):
         raise ValueError("ficheiros de senha ou chave estão proibidos; faça isso à mão")
+    if ext in (".json", ".txt", ".env", ".yml", ".yaml", ".ini", ".cfg") and NOME_SENSIVEL.search(nome):
+        raise ValueError("ficheiros com nome de senha, token ou credencial estão proibidos")
+    partes = [x.lower() for x in re.split(r"[\\/]+", str(p or "")) if x]
+    if any(x in PARTES_BLOQUEADAS for x in partes):
+        raise ValueError("pasta protegida (.git, .ssh, AppData…); faça isso à mão")
+    for i, x in enumerate(partes[:-1]):
+        if x == "data" and partes[i + 1] in SUBPASTAS_DATA:
+            raise ValueError("pasta de dados do SIMBA protegida (tokens do Google, memória)")
+    if "google" in partes[:-1]:
+        raise ValueError("pastas google protegidas (tokens)")
 
 
 def resumo(a: dict) -> str:
     acao = a.get("acao", "")
     if acao == "listar":
-        return f"listar {a.get('pasta') or 'Documentos e Ambiente de trabalho'}"
+        return f"listar {a.get('pasta') or 'a pasta simba-pc'}"
     if acao == "ler":
         return f"ler {a.get('caminho')}"
     if acao == "buscar":
         return f"buscar {a.get('q')!r} em {a.get('pasta') or 'pastas permitidas'}"
     if acao == "escrever":
         n = len(str(a.get("conteudo") or ""))
-        return f"criar/editar {a.get('caminho')} ({n} caracteres)"
+        return f"criar {a.get('caminho')} ({n} caracteres). Se já existir, será SUBSTITUÍDO (com cópia .bak)"
     if acao == "abrir":
         if a.get("app"):
             return f"abrir o app {a.get('app')}"
@@ -168,6 +199,8 @@ def _prepara(a: dict) -> dict:
         raise ValueError("informe o texto a buscar")
     if acao == "abrir" and "app" not in dados and "caminho" not in dados:
         raise ValueError("informe o app (bloco_de_notas, explorador, calculadora) ou o caminho do ficheiro")
+    if acao == "abrir" and "app" not in dados and _ext(dados["caminho"]) not in PERMITIDAS:
+        raise ValueError("só abro " + ", ".join(sorted(PERMITIDAS)) + "; use um app da lista para o resto")
     if acao == "abrir" and dados.get("app") and dados["app"].lower() not in APPS:
         raise ValueError(f"app '{dados['app']}' não está na lista; use: {', '.join(sorted(APPS))}")
     if acao == "terminal":
@@ -186,8 +219,8 @@ def _prepara(a: dict) -> dict:
     if acao == "escrever":
         if "conteudo" not in dados:
             dados["conteudo"] = ""
-        if _ext(dados["caminho"]) in EXEC_EXT:
-            raise ValueError("não crio executáveis nem scripts; faça isso à mão")
+        if _ext(dados["caminho"]) not in PERMITIDAS:
+            raise ValueError("só escrevo " + ", ".join(sorted(PERMITIDAS)) + "; scripts e executáveis faça à mão")
     return dados
 
 
@@ -261,8 +294,8 @@ except ImportError:
 else:
     @tool("pc_acao",
           "Executa uma ação no PC pessoal Windows do Bruno (nunca no PC do trabalho). "
-          "Ações: 'listar' (pasta opcional), 'ler' (caminho), 'buscar' (q, pasta opcional) — livres, só em "
-          "Documentos e Ambiente de trabalho; 'escrever' (caminho, conteudo), 'abrir' (app ou caminho), "
+          "Ações: 'listar' (pasta opcional), 'ler' (caminho), 'buscar' (q, pasta opcional) — livres, só na "
+          "pasta simba-pc do Ambiente de trabalho; 'escrever' (caminho, conteudo), 'abrir' (app ou caminho), "
           "'terminal' (cmd: git_status | processos; git_status precisa de cwd), 'desligar'. "
           "escrever, abrir, terminal e desligar pedem aprovação. "
           "Proibido: apagar, mover, instalar, config do sistema, senhas/chaves, comando livre. "
