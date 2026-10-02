@@ -515,7 +515,7 @@ def self_test() -> int:
             falhas += 1
     # sobrescrever cria .bak
     import tempfile
-    with tempfile.TemporaryDirectory() as t:
+    with tempfile.TemporaryDirectory(dir=str(Path.home())) as t:   # fora do AppData, que é bloqueado de propósito
         os.environ["PC_ALLOW_DIRS"] = t
         alvo = Path(t) / "x.txt"
         alvo.write_text("antigo")
