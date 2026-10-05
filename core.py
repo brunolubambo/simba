@@ -114,14 +114,16 @@ class Simba:
             await self.client.query(ctx + text)
             working: dict[str, str] = {}
             first_text = False
+            first_s = None
             async for msg in self.client.receive_response():
                 if isinstance(msg, AssistantMessage):
                     for b in msg.content:
                         if isinstance(b, TextBlock) and not getattr(msg, "parent_tool_use_id", None):
                             if not first_text:
                                 first_text = True
+                                first_s = time.perf_counter() - t0
                                 print(f"[perf] {time.strftime('%H:%M:%S')} primeiro TextBlock "
-                                      f"+{time.perf_counter() - t0:.2f}s", flush=True)
+                                      f"+{first_s:.2f}s", flush=True)
                             yield {"type": "text", "text": b.text}
                         elif isinstance(b, ToolUseBlock):
                             if b.name in AGENT_TOOLS:
@@ -139,8 +141,11 @@ class Simba:
                     self.session_id = getattr(msg, "session_id", None) or self.session_id
                     if not first_text:
                         print(f"[perf] {time.strftime('%H:%M:%S')} primeiro TextBlock ausente", flush=True)
-                    print(f"[perf] {time.strftime('%H:%M:%S')} done +{time.perf_counter() - t0:.2f}s "
+                    elapsed = time.perf_counter() - t0
+                    print(f"[perf] {time.strftime('%H:%M:%S')} done +{elapsed:.2f}s "
                           f"custo={getattr(msg, 'total_cost_usd', None)}", flush=True)
                     for agent in working.values():
                         yield {"type": "agent", "id": agent, "state": "idle"}
-                    yield {"type": "done", "cost_usd": getattr(msg, "total_cost_usd", None)}
+                    yield {"type": "done", "cost_usd": getattr(msg, "total_cost_usd", None),
+                           "model_s": round(elapsed, 2),
+                           "first_s": round(first_s, 2) if first_s is not None else None}

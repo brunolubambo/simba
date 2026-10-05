@@ -558,8 +558,17 @@ function sayBrowser(t, done) {
 }
 let sayQueue = [], sayBusy = false, sayGen = 0, playFinish = null, voiced = "", turnOpen = false, playingText = "";
 let perfTextAt = 0, perfQueued = false, perfPlayed = false;
-function perfReset() { perfTextAt = 0; perfQueued = false; perfPlayed = false; }
-function perfSawText() { if (!perfTextAt) perfTextAt = performance.now(); }
+let perfSendAt = 0, perfNetMs = 0, perfMine = false, perfSplitLogged = false;
+function perfReset() { perfTextAt = 0; perfQueued = false; perfPlayed = false; perfSplitLogged = false; }
+function perfSawText() {
+  if (perfTextAt) return;
+  perfTextAt = performance.now();
+  if (!perfMine || perfSplitLogged) return;
+  perfSplitLogged = true;
+  const total = Math.round(perfTextAt - perfSendAt);
+  const rede = Math.round(perfNetMs);
+  console.info(`[perf] primeiro texto ${total}ms (rede ${rede}ms, servidor ${Math.max(0, total - rede)}ms)`);
+}
 function perfQueuedAudio() {
   if (!perfTextAt || perfQueued) return;
   perfQueued = true;
@@ -800,7 +809,8 @@ const online = () => ws && ws.readyState === 1;
 function send(o) { if (online()) ws.send(JSON.stringify(o)); else if (o.type === "message") outbox.push(o); }
 function sendMessage(text, voice) {
   silenceNow(); perfReset(); turnOpen = true; voiced = ""; turnText = []; lastSaid = "";
-  $("#heard").textContent = "› " + text; send({ type: "message", text, voice: !!voice });
+  perfSendAt = performance.now(); perfNetMs = 0; perfMine = true;
+  $("#heard").textContent = "› " + text; send({ type: "message", text, voice: !!voice, t: perfSendAt });
   setState("thinking", online() ? "processando" : "sem conexão · envio ao reconectar");
 }
 function rejectToken() { store.del("st"); TOKEN = ""; outbox = []; showLogin(); setState(null, "código recusado"); }
@@ -811,6 +821,7 @@ function connect() {
   let opened = false;
   sock.onopen = () => {
     opened = true; loadPanel(); setState(null, "online");
+    sock.send(JSON.stringify({ type: "ping", t: performance.now() }));
     for (const o of outbox.splice(0)) { sock.send(JSON.stringify(o)); setState("thinking", "processando"); }
   };
   sock.onclose = async e => {
@@ -826,6 +837,13 @@ function connect() {
   ws.onmessage = e => {
     const ev = JSON.parse(e.data);
     switch (ev.type) {
+      case "pong":
+      case "ack":
+        if (typeof ev.t === "number") {
+          perfNetMs = performance.now() - ev.t;
+          console.info(`[perf] rede ${Math.round(perfNetMs)}ms`);
+        }
+        break;
       case "status": { const miss = Object.entries(ev.google || {}).filter(([, v]) => !v.ok).map(([c]) => c); setupNotice(miss, ev.telegram); break; }
       case "user":
         perfReset(); turnOpen = true;
@@ -837,6 +855,10 @@ function connect() {
       case "tool": $("#stateTxt").textContent = ev.name.replace(/_/g, " "); break;
       case "text": perfSawText(); absorbText(ev.text); showSaid(turnText.map(shown).join("\n\n")); if (turnOpen) speakNew(false); break;
       case "done": {
+        if (perfMine && typeof ev.model_s === "number") {
+          console.info(`[perf] modelo ${ev.model_s}s` + (ev.first_s != null ? ` primeiro ${ev.first_s}s` : ""));
+        }
+        perfMine = false;
         turnOpen = false; speakNew(true); turnText = []; voiced = "";
         document.querySelectorAll(".ag.on").forEach(d => agentState(d.id.slice(3), false));
         if (!sayBusy && !sayQueue.length) doneSpeaking();
