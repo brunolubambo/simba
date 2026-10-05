@@ -127,7 +127,15 @@ async def ws(socket: WebSocket, token: str = "", device: str = "pc"):
         while True:
             data = json.loads(await socket.receive_text())
             kind = data.get("type")
-            if kind == "message" and data.get("text", "").strip():
+            if kind == "ping":
+                await socket.send_json({"type": "pong", "t": data.get("t")})
+            elif kind == "message" and data.get("text", "").strip():
+                # Ack na hora, neste socket, antes do modelo: o app mede a ida e volta da rede.
+                try:
+                    await socket.send_json({"type": "ack", "t": data.get("t")})
+                except Exception:
+                    pass
+                print(f"[perf] {time.strftime('%H:%M:%S')} ws recebida (ack imediato, modelo ainda não começou)", flush=True)
                 t = asyncio.create_task(run_and_broadcast(data["text"], device, voice=bool(data.get("voice"))))
                 tasks.add(t); t.add_done_callback(tasks.discard)
             elif kind == "approve":
