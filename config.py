@@ -18,6 +18,7 @@ for p in (DATA, WORKSPACE, MEMORY, DATA / "google", DATA / "agents"):
 MODEL = os.getenv("SIMBA_MODEL", "claude-sonnet-5-5")
 FAST_MODEL = os.getenv("OBSERVER_MODEL", "claude-haiku-4-5-20251001")
 MAX_TURNS = int(os.getenv("SIMBA_MAX_TURNS", "30"))
+MAX_SESSION_TURNS = int(os.getenv("SIMBA_MAX_SESSION_TURNS", "15"))
 MAX_BUDGET_USD = float(os.getenv("SIMBA_MAX_BUDGET_USD", "2"))
 TZ = os.getenv("SIMBA_TZ", "America/Fortaleza")
 
