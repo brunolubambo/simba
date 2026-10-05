@@ -25,5 +25,7 @@ edge-tts>=7.0
 python-docx>=1.1
 fpdf2>=2.7
 
-# Desktop-only extras (voice/screen) are intentionally NOT installed on the server:
-# mss, sounddevice, faster-whisper
+# Desktop-only voice on the PC (not installed in the Railway image).
+# The app falls back to the browser mic and edge-tts when these are missing:
+#   pip install faster-whisper piper-tts
+# mss, sounddevice

@@ -21,7 +21,7 @@ from .config import ROOT, WORKSPACE, ACCOUNTS, public_url
 from .core import Simba
 from .hub import Hub, save_sub, send_push, vapid, PUSH_TOO
 from .observer import Observer
-from . import tasks, life, google, memory, telegram
+from . import tasks, life, google, memory, telegram, voice
 from .agents import roster
 
 TOKEN = os.getenv("SIMBA_TOKEN", "")
@@ -90,7 +90,7 @@ async def lifespan(app):
     telegram.spawn()
     bg = [asyncio.create_task(c) for c in (
         state["simba"].warm(), state["observer"].run(), tasks.reminders_loop(hub), tasks.routines_loop(run_and_broadcast),
-        tasks.mail_loop(hub), tasks.calendar_loop(hub))]
+        tasks.mail_loop(hub), tasks.calendar_loop(hub), asyncio.to_thread(voice.warm))]
     yield
     for t in bg:
         t.cancel()
@@ -194,50 +194,128 @@ def speech_pieces(text: str, limit: int = 1800) -> list[str]:
     return [p for p in parts if p]
 
 
-TTS_JOBS: dict[str, str] = {}
+class _Clip:
+    """Áudio que começa a ser gerado no POST, antes de o player abrir o GET."""
+
+    def __init__(self, text: str):
+        self.text = text
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.task = asyncio.create_task(self._run())
+
+    def cancel(self):
+        self.task.cancel()
+
+    async def _run(self):
+        try:
+            try:
+                if voice.piper_ready():
+                    wav = await asyncio.to_thread(voice.synth_piper, self.text)
+                    if wav:
+                        await self.queue.put(wav)
+                        return
+                import edge_tts
+                for piece in speech_pieces(self.text):
+                    async for chunk in edge_tts.Communicate(piece, VOICE, rate=VOICE_RATE, pitch=VOICE_PITCH).stream():
+                        if chunk["type"] == "audio" and chunk.get("data"):
+                            await self.queue.put(chunk["data"])
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                await self.queue.put(e)
+        finally:
+            self.queue.put_nowait(b"")
+
+
+TTS_JOBS: dict[str, _Clip] = {}
 
 
 @app.post("/tts")
 async def tts(body: dict = Body(...), token: str = Query("")):
-    """Guarda a fala e devolve um id. O player abre GET /tts/{id}, que toca enquanto o áudio ainda chega."""
+    """Guarda a fala e devolve um id. A síntese já começa aqui, para o GET tocar o primeiro pedaço."""
     check(token)
     text = str(body.get("text", "")).strip()
     if not text:
         raise HTTPException(400, "texto vazio")
     while len(TTS_JOBS) >= 20:
-        TTS_JOBS.pop(next(iter(TTS_JOBS)))
+        TTS_JOBS.pop(next(iter(TTS_JOBS))).cancel()
     job = secrets.token_urlsafe(12)
-    TTS_JOBS[job] = text
+    TTS_JOBS[job] = _Clip(text)
     return {"id": job}
 
 
 @app.get("/tts/{job}")
 async def tts_stream(job: str, token: str = Query("")):
-    """Voz neural em MP3, enviada pedaço a pedaço. Se falhar antes do primeiro pedaço, o app usa a voz do celular."""
+    """Áudio conforme fica pronto. WAV se o Piper estiver no PC; senão MP3 do edge-tts."""
     check(token)
-    text = TTS_JOBS.pop(job, None)
-    if not text:
+    clip = TTS_JOBS.pop(job, None)
+    if not clip:
         raise HTTPException(404, "fala expirada")
-
-    async def audio():
-        import edge_tts
-        for piece in speech_pieces(text):
-            async for chunk in edge_tts.Communicate(piece, VOICE, rate=VOICE_RATE, pitch=VOICE_PITCH).stream():
-                if chunk["type"] == "audio":
-                    yield chunk["data"]
-
-    chunks = audio()
-    try:
-        first = await chunks.__anext__()
-    except Exception as e:
-        raise HTTPException(503, f"voz indisponível: {e}"[:200])
+    first = await clip.queue.get()
+    if isinstance(first, Exception) or first == b"":
+        raise HTTPException(503, f"voz indisponível: {first}"[:200])
+    if first[:4] == b"RIFF":
+        rest = []
+        while True:
+            part = await clip.queue.get()
+            if isinstance(part, Exception) or part == b"":
+                break
+            rest.append(part)
+        return Response(b"".join([first, *rest]), media_type="audio/wav", headers={"Cache-Control": "no-store"})
 
     async def body():
         yield first
-        async for data in chunks:
-            yield data
+        while True:
+            part = await clip.queue.get()
+            if isinstance(part, Exception) or part == b"":
+                break
+            yield part
 
     return StreamingResponse(body(), media_type="audio/mpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.websocket("/ear")
+async def ear(socket: WebSocket, token: str = ""):
+    """PCM 16 kHz do navegador entra; texto parcial e final saem. Sem o modelo, manda off."""
+    if not TOKEN or not secrets.compare_digest(token or "", TOKEN):
+        await socket.close(code=4401)
+        return
+    await socket.accept()
+    if not voice.installed():
+        await socket.send_json({"type": "off"})
+        await socket.close()
+        return
+    await socket.send_json({"type": "loading"})
+    if not await asyncio.to_thread(voice.ensure_model):
+        await socket.send_json({"type": "off"})
+        await socket.close()
+        return
+    await socket.send_json({"type": "ready"})
+    dec = voice.Decoder()
+    partial_lock = asyncio.Lock()
+
+    async def partial(audio: bytes):
+        if partial_lock.locked():
+            return
+        try:
+            async with partial_lock:
+                text = await asyncio.to_thread(voice.transcribe, audio)
+                if text:
+                    await socket.send_json({"type": "partial", "text": text})
+        except Exception:
+            pass
+
+    try:
+        while True:
+            pcm = await socket.receive_bytes()
+            for kind, audio in dec.feed(pcm):
+                if kind == "partial":
+                    asyncio.create_task(partial(audio))
+                else:
+                    text = await asyncio.to_thread(voice.transcribe, audio)
+                    if text:
+                        await socket.send_json({"type": "final", "text": text})
+    except WebSocketDisconnect:
+        pass
 
 
 @app.get("/health")

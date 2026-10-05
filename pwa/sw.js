@@ -1,5 +1,5 @@
-const CACHE = "simba-hud-4";
-const SHELL = ["./", "index.html", "hud.js", "manifest.json", "icon.svg",
+const CACHE = "simba-hud-5";
+const SHELL = ["./", "index.html", "hud.js", "ear-worklet.js", "manifest.json", "icon.svg",
   "vendor/three/build/three.module.js",
   "vendor/three/examples/jsm/postprocessing/EffectComposer.js",
   "vendor/three/examples/jsm/postprocessing/RenderPass.js",

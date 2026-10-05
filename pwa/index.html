@@ -229,7 +229,7 @@ function doneSpeaking() {
   setState(null, "online");
   setTimeout(() => { if (!speaking) startListening(); }, 400);
 }
-function freeUrl() { if (playingUrl) { URL.revokeObjectURL(playingUrl); playingUrl = null; } }
+function freeUrl() { if (playingUrl && playingUrl.startsWith("blob:")) URL.revokeObjectURL(playingUrl); playingUrl = null; }
 function sayBrowser(t, done) {
   if (!("speechSynthesis" in window)) return done();
   const u = new SpeechSynthesisUtterance(t); u.lang = "pt-BR"; if (voice) u.voice = voice; u.rate = 1.05;
@@ -261,11 +261,7 @@ async function fetchClip(text, gen) {
     if (!r.ok || gen !== sayGen) return null;
     const job = (await r.json()).id;
     if (!job || gen !== sayGen) return null;
-    const audio = await fetch(`/tts/${job}?token=${T()}`);
-    if (!audio.ok || gen !== sayGen) return null;
-    const blob = await audio.blob();
-    if (!blob.size || gen !== sayGen) return null;
-    return URL.createObjectURL(blob);
+    return `/tts/${job}?token=${T()}`;
   } catch { return null; }
 }
 function playClip(url, text, gen) {
@@ -372,9 +368,10 @@ function speakNew(flush) {
   }
 }
 
-// ---------- escuta contínua enquanto a página está aberta: "ei, Simba" ----------
+// ---------- escuta: no PC o áudio vai para /ear; se o modelo não estiver aí, usa o Chrome ----------
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let rec = null, wantListen = true, pendingApproval = null, wakeTimer = 0;
+let earOn = false, earMuted = false, earGen = 0, earSock = null, earCtx = null, earStream = null, earFails = 0;
 const YES = /^(sim|pode|autorizo|confirmo|confirma|manda|envia|ok|claro|isso|positivo|faca|faz|segue)\b/;
 const NO = /^(nao|cancela|negado|nega|para|pare|espera|negativo)\b/;
 // pt-BR escreve "Simba" como samba, sinba, zimba. "ei"/"hey" e a vírgula são opcionais.
@@ -393,8 +390,15 @@ function afterWake(t) {  // frase inteira depois da ativação, ou null se ela n
   }
   return src.slice(i).trim();
 }
-function startListening() { if (!SR || speaking || !wantListen) return; try { rec.start(); } catch {} }
-function stopListening() { if (rec) try { rec.abort(); } catch {} }
+function startListening() {
+  if (earOn) {
+    earMuted = speaking || !wantListen;
+    if (!speaking && wantListen) setState("listening", Date.now() < convoUntil ? "pode falar" : "diga “ei, Simba”");
+    return;
+  }
+  if (!SR || speaking || !wantListen) return; try { rec.start(); } catch {}
+}
+function stopListening() { earMuted = true; if (rec) try { rec.abort(); } catch {} }
 if (SR) {
   rec = new SR(); rec.lang = "pt-BR"; rec.continuous = true; rec.interimResults = true;
   rec.onstart = () => {
@@ -408,7 +412,84 @@ if (SR) {
     if (final) handleUtterance(final.trim());
   };
   rec.onerror = e => { if (e.error === "not-allowed" || e.error === "service-not-allowed") { wantListen = false; showWake(); } };
-  rec.onend = () => { if (!speaking && wantListen) setTimeout(startListening, 250); };
+  rec.onend = () => { if (!speaking && wantListen && !earOn) setTimeout(startListening, 250); };
+}
+
+function pcm16k(input, fromRate, state) {
+  const ratio = fromRate / 16000;
+  const merged = new Float32Array(state.acc.length + input.length);
+  merged.set(state.acc, 0); merged.set(input, state.acc.length);
+  const want = 1600;
+  if (Math.floor(merged.length / ratio) < want) { state.acc = merged; return null; }
+  const use = Math.floor(want * ratio);
+  const pcm = new Int16Array(want);
+  for (let i = 0; i < want; i++) {
+    const s = Math.max(-1, Math.min(1, merged[Math.min(merged.length - 1, Math.floor(i * ratio))]));
+    pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  state.acc = merged.slice(use);
+  return pcm.buffer;
+}
+function giveUpEar() {
+  earOn = false; earFails = 99;
+  if (earStream) earStream.getTracks().forEach(t => t.stop());
+  earStream = null;
+  try { earCtx && earCtx.close(); } catch {}
+  earCtx = null;
+  if (wantListen) startListening();
+}
+async function connectEar() {
+  if (!TOKEN || !navigator.mediaDevices || location.protocol === "file:") return;
+  const gen = ++earGen;
+  if (earSock) { try { earSock.onclose = null; earSock.close(); } catch {} earSock = null; }
+  try {
+    if (!earStream || !earStream.getTracks().some(t => t.readyState === "live"))
+      earStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
+    if (!earCtx || earCtx.state === "closed") {
+      earCtx = new AudioContext();
+      await earCtx.audioWorklet.addModule("ear-worklet.js");
+      const node = new AudioWorkletNode(earCtx, "ear");
+      earCtx.createMediaStreamSource(earStream).connect(node);
+      const state = { acc: new Float32Array(0) };
+      node.port.onmessage = e => {
+        if (!earOn || earMuted || speaking || !earSock || earSock.readyState !== 1) return;
+        const buf = pcm16k(e.data, earCtx.sampleRate, state);
+        if (buf) earSock.send(buf);
+      };
+    }
+    if (earCtx.state === "suspended") await earCtx.resume();
+  } catch { return giveUpEar(); }
+  if (gen !== earGen) return;
+  const sock = earSock = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ear?token=${T()}`);
+  sock.binaryType = "arraybuffer";
+  await new Promise(resolve => {
+    let settled = false;
+    const done = () => { if (!settled) { settled = true; resolve(); } };
+    sock.onmessage = e => {
+      let msg; try { msg = JSON.parse(e.data); } catch { return; }
+      if (msg.type === "loading") { setState(null, "preparando ouvido"); return; }
+      if (msg.type === "off") { giveUpEar(); done(); return; }
+      if (msg.type === "ready") {
+        earOn = true; earFails = 0; earMuted = speaking || !wantListen;
+        if (rec) try { rec.abort(); } catch {}
+        if (!speaking) setState("listening", Date.now() < convoUntil ? "pode falar" : "diga “ei, Simba”");
+        done();
+        return;
+      }
+      if (speaking || !msg.text) return;
+      if (msg.type === "partial") {
+        $("#heard").textContent = "› " + msg.text;
+        if (afterWake(msg.text) !== null) setState("listening", "ouvindo");
+      } else if (msg.type === "final") handleUtterance(msg.text);
+    };
+    sock.onclose = () => {
+      done();
+      if (gen !== earGen || earFails >= 3) return;
+      const was = earOn; earOn = false;
+      if (was && wantListen) { earFails++; setTimeout(connectEar, 800); }
+      else if (wantListen) startListening();
+    };
+  });
 }
 
 function dispatch(cmd) {
@@ -431,7 +512,7 @@ function handleUtterance(t) {
     clearTimeout(wakeTimer); wakeTimer = 0;
     if (rest) return dispatch(rest);                 // o que veio depois de "ei, Simba" vai inteiro para a IA
     $("#heard").textContent = "› ei, Simba";
-    wakeTimer = setTimeout(() => { wakeTimer = 0; if (!speaking) say("Pois não, senhor?"); }, 1600);
+    wakeTimer = setTimeout(() => { wakeTimer = 0; if (!speaking) say("Pois não, senhor?"); }, earOn ? 450 : 1600);
     return;
   }
   if (wakeTimer) { clearTimeout(wakeTimer); wakeTimer = 0; return dispatch(t.trim()); }
@@ -533,10 +614,11 @@ function showWake() {
 async function activate() {
   unlockAudio();
   $("#wake").classList.remove("show"); $("#wake").onclick = null; wantListen = true;
-  try { const s = await navigator.mediaDevices.getUserMedia({ audio: true }); s.getTracks().forEach(t => t.stop()); } catch {}
   try { await setupPush(); } catch {}
   try { await navigator.wakeLock?.request("screen"); } catch {}
-  store.set("activated", "1"); startListening();
+  store.set("activated", "1");
+  await connectEar();
+  if (!earOn) startListening();
   say("Sistemas online. Às suas ordens, senhor.");
 }
 function showLogin() {
@@ -610,7 +692,10 @@ connect(); if (TOKEN) loadPanel();
 if (googleMsg) $("#heard").textContent = "Google: " + googleMsg;
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 if (TOKEN) {
-  if (store.get("activated") && SR) { startListening(); navigator.wakeLock?.request("screen").catch(() => {}); setupPush().catch(() => {}); }
+  if (store.get("activated")) {
+    connectEar().finally(() => { if (!earOn && wantListen) startListening(); });
+    navigator.wakeLock?.request("screen").catch(() => {}); setupPush().catch(() => {});
+  }
   else showWake();
 }
 document.addEventListener("visibilitychange", () => {
