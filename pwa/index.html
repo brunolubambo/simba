@@ -269,7 +269,7 @@ function perfPlayedAudio() {
 }
 let lastSaid = "", echoUntil = 0, lastHeard = "", lastHeardAt = 0;
 function silenceNow() {
-  sayGen++; sayQueue = [];
+  sayGen++; sayQueue = []; sayBusy = false;
   const finish = playFinish; playFinish = null;
   if ("speechSynthesis" in window) speechSynthesis.cancel();
   player.onended = player.onerror = null;
