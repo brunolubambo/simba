@@ -218,17 +218,16 @@ function pickVoice() {
 if ("speechSynthesis" in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
 function spoken(t) {
   return t
-    .replace(/```[a-zA-Z0-9_-]*\n?/g, " ")
+    .replace(/```[\s\S]*?```/g, " ")
     .replace(/`([^`]+)`/g, "$1")
     .replace(/!\[[^\]]*\]\([^)]+\)/g, " ")
     .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-    .replace(/https?:\/\/[^\s<>)\]]+/g, u => {
-      const trail = (u.match(/[.,;:!?]+$/) || [""])[0];
-      const core = u.slice(0, u.length - trail.length);
-      return core.replace(/^https?:\/\//, "").replace(/[\/?#&=_%+.-]+/g, " ") + trail;
-    })
+    .replace(/https?:\/\/\S+/g, " link ")
+    .replace(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/gi, " e-mail ")
     .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*]\s+/gm, "")
     .replace(/[*_>#|]/g, "")
+    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -243,8 +242,31 @@ function sayBrowser(t, done) {
   const u = new SpeechSynthesisUtterance(t); u.lang = "pt-BR"; if (voice) u.voice = voice; u.rate = 1.05;
   u.onend = u.onerror = () => done();
   speechSynthesis.speak(u);
+  perfPlayedAudio();
 }
 let sayQueue = [], sayBusy = false, sayGen = 0, playFinish = null, voiced = "", turnOpen = false, playingText = "";
+let perfTextAt = 0, perfQueued = false, perfPlayed = false;
+let perfSendAt = 0, perfNetMs = 0, perfMine = false, perfSplitLogged = false;
+function perfReset() { perfTextAt = 0; perfQueued = false; perfPlayed = false; perfSplitLogged = false; }
+function perfSawText() {
+  if (perfTextAt) return;
+  perfTextAt = performance.now();
+  if (!perfMine || perfSplitLogged) return;
+  perfSplitLogged = true;
+  const total = Math.round(perfTextAt - perfSendAt);
+  const rede = Math.round(perfNetMs);
+  console.info(`[perf] primeiro texto ${total}ms (rede ${rede}ms, servidor ${Math.max(0, total - rede)}ms)`);
+}
+function perfQueuedAudio() {
+  if (!perfTextAt || perfQueued) return;
+  perfQueued = true;
+  console.info(`[perf] texto->fila ${Math.round(performance.now() - perfTextAt)}ms`);
+}
+function perfPlayedAudio() {
+  if (!perfTextAt || perfPlayed) return;
+  perfPlayed = true;
+  console.info(`[perf] texto->áudio ${Math.round(performance.now() - perfTextAt)}ms`);
+}
 let lastSaid = "", echoUntil = 0, lastHeard = "", lastHeardAt = 0;
 function silenceNow() {
   sayGen++; sayQueue = [];
@@ -260,6 +282,7 @@ function say(text) {
   const t = spoken(text);
   if (!t || t === playingText || t === sayQueue[sayQueue.length - 1]) return;
   sayQueue.push(t);
+  perfQueuedAudio();
   pumpSay();
 }
 async function fetchClip(text, gen) {
@@ -307,7 +330,7 @@ function playClip(url, text, gen) {
     };
     playingUrl = url;
     player.src = url;
-    player.play().then(() => { heard = true; }).catch(e => {
+    player.play().then(() => { heard = true; perfPlayedAudio(); }).catch(e => {
       if (gen !== sayGen || heard || browser) return;
       if (!(e && e.name === "NotAllowedError")) serverVoiceOffUntil = Date.now() + 5 * 60 * 1000;
       fallback();
@@ -423,7 +446,7 @@ if (SR) {
 function dispatch(cmd) {
   if (!cmd) return;
   if (/^(obrigad|valeu|era isso|so isso|pode parar|dispensado)/.test(norm(cmd))) { convoUntil = 0; return say("Às ordens."); }
-  sendMessage(cmd);
+  sendMessage(cmd, true);
 }
 function handleUtterance(t) {
   const n = norm(t);
@@ -489,9 +512,10 @@ const shown = t => t.replace(/\*\*(.+?)\*\*/g, "$1").replace(/__(.+?)__/g, "$1")
 function showSaid(t) { const s = $("#said"); s.textContent = t; s.classList.toggle("long", t.length > 160); s.scrollTop = 0; }
 const online = () => ws && ws.readyState === 1;
 function send(o) { if (online()) ws.send(JSON.stringify(o)); else if (o.type === "message") outbox.push(o); }
-function sendMessage(text) {
-  silenceNow(); turnOpen = true; voiced = ""; turnText = []; lastSaid = "";
-  $("#heard").textContent = "› " + text; send({ type: "message", text });
+function sendMessage(text, voice) {
+  silenceNow(); perfReset(); turnOpen = true; voiced = ""; turnText = []; lastSaid = "";
+  perfSendAt = performance.now(); perfNetMs = 0; perfMine = true;
+  $("#heard").textContent = "› " + text; send({ type: "message", text, voice: !!voice, t: perfSendAt });
   setState("thinking", online() ? "processando" : "sem conexão · envio ao reconectar");
 }
 function rejectToken() { store.del("st"); TOKEN = ""; outbox = []; showLogin(); setState(null, "código recusado"); }
@@ -502,6 +526,7 @@ function connect() {
   let opened = false;
   sock.onopen = () => {
     opened = true; loadPanel(); setState(null, "online");
+    sock.send(JSON.stringify({ type: "ping", t: performance.now() }));
     for (const o of outbox.splice(0)) { sock.send(JSON.stringify(o)); setState("thinking", "processando"); }
   };
   sock.onclose = async e => {
@@ -518,10 +543,17 @@ function connect() {
   ws.onmessage = e => {
     const ev = JSON.parse(e.data);
     switch (ev.type) {
+      case "pong":
+      case "ack":
+        if (typeof ev.t === "number") {
+          perfNetMs = performance.now() - ev.t;
+          console.info(`[perf] rede ${Math.round(perfNetMs)}ms`);
+        }
+        break;
       case "status": { const miss = Object.entries(ev.google || {}).filter(([, v]) => !v.ok).map(([c]) => c); setupNotice(miss, ev.telegram); if (ev.rotinas) renderRotinas(ev.rotinas); break; }
       case "rotinas": renderRotinas(ev.itens); break;
       case "user":
-        turnOpen = true;
+        perfReset(); turnOpen = true;
         speakTurn = ev.falar !== false;
         if (ev.device !== DEVICE) { silenceNow(); voiced = ""; lastSaid = ""; }
         turnText = [];
@@ -529,8 +561,12 @@ function connect() {
         setState("thinking", ev.device === "proativo" ? "agindo por conta própria" : ev.device === "rotina" ? "rotina" : "processando"); break;
       case "agent": agentState(ev.id, ev.state === "working", ev.task); break;
       case "tool": $("#stateTxt").textContent = ev.name.replace(/_/g, " "); break;
-      case "text": absorbText(ev.text); showSaid(turnText.map(shown).join("\n\n")); if (turnOpen && speakTurn) speakNew(false); break;
+      case "text": perfSawText(); absorbText(ev.text); showSaid(turnText.map(shown).join("\n\n")); if (turnOpen && speakTurn) speakNew(false); break;
       case "done": {
+        if (perfMine && typeof ev.model_s === "number") {
+          console.info(`[perf] modelo ${ev.model_s}s` + (ev.first_s != null ? ` primeiro ${ev.first_s}s` : ""));
+        }
+        perfMine = false;
         turnOpen = false; if (speakTurn) speakNew(true); turnText = []; voiced = "";
         document.querySelectorAll(".ag.on").forEach(d => agentState(d.id.slice(3), false));
         if (!sayBusy && !sayQueue.length) doneSpeaking();
