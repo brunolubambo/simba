@@ -10,6 +10,7 @@ from .vision import vision_server
 from .google import google_server, authorized
 from .life import life_server
 from .squad import squad_server, CHANGED
+from .tasks import routines_server
 from .telegram import telegram_server
 from .documentos import docs_server
 from . import browser, celular, pc
@@ -41,7 +42,7 @@ class Simba:
     def _build(self):
         system = (PROMPTS / "simba.md").read_text() + "\n\n# Memória\n" + load_context()
         servers = {"memory": memory_server, "google": google_server, "vida": life_server, "squad": squad_server,
-                   "telegram": telegram_server, "docs": docs_server}
+                   "telegram": telegram_server, "docs": docs_server, "rotinas": routines_server}
         if os.getenv("OBSERVER_ENABLED", "true").lower() == "true":
             servers["vision"] = vision_server
         if celular.enabled():

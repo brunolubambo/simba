@@ -1,7 +1,7 @@
 """Servidor central (roda no PC). PC e celular abrem o mesmo app web e compartilham o mesmo Simba.
 WebSocket /ws?token=...&device=pc|celular
   entrada: {type:message,text} | {type:approve,id,ok} | {type:accept,id} | {type:dismiss,id} | {type:reminder_snooze,id,min} | {type:observer,on}
-  saída:   text | tool | done | approval | approval_closed | suggestion | activity | status | error
+  saída:   text | tool | done | approval | approval_closed | suggestion | activity | status | rotinas | error
 HTTP: POST /upload?token= (imagem do celular, ex.: Atalho do iOS) | POST /push/subscribe | GET /push/key
       POST /tts?token= ({text} -> {id}) + GET /tts/{id}?token= (voz neural em MP3, transmitida) | POST /telegram/webhook (mensagens do bot, ver telegram.py)
       POST /celular/resultado?token= , GET /celular/proximo?token= e POST /celular/foto?token=&id= (o app confirma um comando, ver celular.py)
@@ -36,8 +36,13 @@ def check(token: str):
         raise HTTPException(401, "token inválido")
 
 
-async def run_and_broadcast(text: str, origin: str):
-    await hub.broadcast({"type": "user", "text": text, "device": origin})
+async def run_and_broadcast(text: str, origin: str, canal: str | None = None):
+    user = {"type": "user", "text": text, "device": origin}
+    if canal:
+        user["canal"] = canal
+    if canal == "HUD":
+        user["falar"] = False
+    await hub.broadcast(user)
     final: list[str] = []                    # texto depois da última ferramenta = a resposta final
     try:
         async for ev in state["simba"].ask(text):
@@ -56,9 +61,11 @@ async def run_and_broadcast(text: str, origin: str):
         if origin == "telegram" and not last:
             last = "Feito."
         sent = False
-        if last and origin in ("rotina", "proativo", "telegram"):   # chegam no Telegram mesmo com o app fechado
+        # Rotina no canal Telegram segue o caminho de sempre. HUD e voz ficam no app.
+        fora = origin in ("proativo", "telegram") or (origin == "rotina" and canal in (None, "Telegram"))
+        if last and fora:
             sent = await telegram.deliver(last, origin)
-        if origin == "rotina" and last and (not sent or PUSH_TOO):
+        if origin == "rotina" and last and canal in (None, "Telegram") and (not sent or PUSH_TOO):
             await asyncio.to_thread(send_push, {"titulo": "SIMBA", "motivo": last})
     except Exception as e:
         await hub.broadcast({"type": "error", "text": str(e)})
@@ -73,11 +80,16 @@ def status() -> dict:
             "google": {c: {"email": e, "ok": c in ok} for c, e in ACCOUNTS.items()},
             "telegram": telegram.snapshot(),
             "celular": {"ok": celular.enabled()},
-            "pc": {"ok": pc.enabled(), "agente": pc.conectado()}}
+            "pc": {"ok": pc.enabled(), "agente": pc.conectado()},
+            "rotinas": tasks.snapshot()}
 
 
 @asynccontextmanager
 async def lifespan(app):
+    async def publicar_rotinas(itens):
+        await hub.broadcast({"type": "rotinas", "itens": itens})
+
+    tasks.bind(asyncio.get_running_loop(), publicar_rotinas)
     state["simba"] = Simba(hub.approve)
     if AUTO_ACT:
         async def act(s):
