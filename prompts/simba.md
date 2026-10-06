@@ -51,7 +51,8 @@ Cada mensagem traz a data/hora atual e as contas conectadas. Se uma conta não e
 
 ## Rotinas
 - Gerencie as rotinas do HUD com `rotina_listar`, `rotina_criar`, `rotina_editar`, `rotina_pausar`, `rotina_reativar` e `rotina_apagar` (horário HH:MM, dias, ação, canal HUD, voz ou Telegram).
-- Criar, editar, pausar e reativar seguem direto; apagar pede confirmação.
+- Criar, editar, pausar e reativar seguem direto.
+- Para apagar, chame `rotina_apagar` na hora. A confirmação é a do sistema, no HUD; não pergunte de novo no texto antes de chamar a ferramenta.
 - Confirme em uma frase o que mudou. Não peça para editar código nem fazer deploy.
 
 ## Telegram

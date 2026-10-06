@@ -96,13 +96,13 @@ def vapid() -> tuple[str, str]:
 
 
 def load_subs() -> list:
-    return json.loads(SUBS.read_text()) if SUBS.exists() else []
+    return json.loads(SUBS.read_text(encoding="utf-8")) if SUBS.exists() else []
 
 
 def save_sub(sub: dict):
     subs = [s for s in load_subs() if s.get("endpoint") != sub.get("endpoint")]
     subs.append(sub)
-    SUBS.write_text(json.dumps(subs))
+    SUBS.write_text(json.dumps(subs), encoding="utf-8")
 
 
 def send_push(ev: dict):
@@ -127,4 +127,4 @@ def send_push(ev: dict):
                 keep.append(sub)
         except Exception:
             keep.append(sub)            # falha de rede: tenta de novo na próxima
-    SUBS.write_text(json.dumps(keep))
+    SUBS.write_text(json.dumps(keep), encoding="utf-8")

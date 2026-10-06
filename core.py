@@ -40,7 +40,7 @@ class Simba:
         self._build()
 
     def _build(self):
-        system = (PROMPTS / "simba.md").read_text() + "\n\n# Memória\n" + load_context()
+        system = (PROMPTS / "simba.md").read_text(encoding="utf-8") + "\n\n# Memória\n" + load_context()
         servers = {"memory": memory_server, "google": google_server, "vida": life_server, "squad": squad_server,
                    "telegram": telegram_server, "docs": docs_server, "rotinas": routines_server}
         if os.getenv("OBSERVER_ENABLED", "true").lower() == "true":

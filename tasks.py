@@ -477,7 +477,7 @@ async def routines_loop(run):
 async def mail_loop(hub, interval_min: int = 10):
     """Vigia os e-mails novos das duas contas e sugere ação quando precisa.
     Na primeira vez que vê uma conta, só aprende o que já existe (não sugere nada antigo)."""
-    seen: dict = json.loads(SEEN.read_text()) if SEEN.exists() else {}
+    seen: dict = json.loads(SEEN.read_text(encoding="utf-8")) if SEEN.exists() else {}
     while True:
         try:
             for conta in google.authorized():
@@ -486,11 +486,11 @@ async def mail_loop(hub, interval_min: int = 10):
                 known = set(seen.get(conta, []))
                 new = [m for m in msgs if m["id"] not in known]
                 seen[conta] = (list(known) + [m["id"] for m in new])[-1000:]
-                SEEN.write_text(json.dumps(seen))
+                SEEN.write_text(json.dumps(seen), encoding="utf-8")
                 if first_time or not new or (not hub.clients and not hub.has_push() and not telegram.ready()):
                     continue
                 lista = "\n".join(f"id={m['id']} | de={m['de']} | assunto={m['assunto']} | {m['trecho']}" for m in new)
-                items = await fast_json((PROMPTS / "mail_triage.md").read_text(), f"Conta: {conta}\n{lista}") or []
+                items = await fast_json((PROMPTS / "mail_triage.md").read_text(encoding="utf-8"), f"Conta: {conta}\n{lista}") or []
                 for it in items:
                     if float(it.get("confianca", 0)) >= 0.6 and it.get("acao"):
                         await hub.suggest({"titulo": it.get("titulo"), "motivo": f"[{conta}] {it.get('motivo', '')}",

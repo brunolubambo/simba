@@ -33,31 +33,31 @@ def topics() -> list[str]:
 
 def _write_index():
     INDEX.write_text("---\ntags: [simba]\n---\n# Índice da memória do Simba\n\n- [[Perfil]]\n- [[Notas]]\n"
-                     + "".join(f"- [[{t}]]\n" for t in topics()))
+                     + "".join(f"- [[{t}]]\n" for t in topics()), encoding="utf-8")
 
 
 def add_fact(fact: str, topico: str = "") -> str:
     stamp = f"{now():%Y-%m-%d}"
     if not topico:
         if not NOTES.exists():
-            NOTES.write_text("---\ntags: [simba]\n---\n# Notas\n\n")
-        with NOTES.open("a") as f:
+            NOTES.write_text("---\ntags: [simba]\n---\n# Notas\n\n", encoding="utf-8")
+        with NOTES.open("a", encoding="utf-8") as f:
             f.write(f"- {stamp}: {fact}\n")
         return "Notas"
     t = slug(topico)
     f = TOPICS / f"{t}.md"
     if not f.exists():
-        f.write_text(f"---\ntags: [simba, topico]\ncriado: {stamp}\n---\n# {t}\n\nVoltar: [[Índice]]\n\n")
+        f.write_text(f"---\ntags: [simba, topico]\ncriado: {stamp}\n---\n# {t}\n\nVoltar: [[Índice]]\n\n", encoding="utf-8")
         _write_index()
-    with f.open("a") as fh:
+    with f.open("a", encoding="utf-8") as fh:
         fh.write(f"- {stamp}: {fact}\n")
     return t
 
 
 def load_context() -> str:
-    parts = [PROFILE.read_text()]
+    parts = [PROFILE.read_text(encoding="utf-8")]
     if NOTES.exists():
-        parts.append("## Notas recentes\n" + NOTES.read_text()[-4000:])
+        parts.append("## Notas recentes\n" + NOTES.read_text(encoding="utf-8")[-4000:])
     if topics():
         parts.append("## Tópicos na memória (use recall para ler)\n" + ", ".join(topics()))
     return "\n\n".join(parts)
@@ -68,9 +68,9 @@ def search(q: str, limit: int = 40) -> list[str]:
     hits = []
     for f in sorted(MEMORY.rglob("*.md")):
         if q in f.stem.lower():
-            hits.append(f"## {f.stem}\n" + f.read_text()[-3000:])
+            hits.append(f"## {f.stem}\n" + f.read_text(encoding="utf-8")[-3000:])
             continue
-        hits += [f"[{f.stem}] {l}" for l in f.read_text().splitlines() if q in l.lower()]
+        hits += [f"[{f.stem}] {l}" for l in f.read_text(encoding="utf-8").splitlines() if q in l.lower()]
     return hits[:limit]
 
 
@@ -83,7 +83,7 @@ def export_zip() -> bytes:
 
 
 def stats() -> dict:
-    lines = sum(1 for f in MEMORY.rglob("*.md") for l in f.read_text().splitlines() if l.startswith("- "))
+    lines = sum(1 for f in MEMORY.rglob("*.md") for l in f.read_text(encoding="utf-8").splitlines() if l.startswith("- "))
     return {"topicos": topics(), "fatos": lines}
 
 

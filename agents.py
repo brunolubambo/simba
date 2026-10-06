@@ -22,7 +22,7 @@ PRESETS = {
 
 
 def _p(name: str) -> str:
-    return (PROMPTS / f"{name}.md").read_text()
+    return (PROMPTS / f"{name}.md").read_text(encoding="utf-8")
 
 
 # nome: (grupo, rótulo no painel, descrição para o orquestrador, ferramentas)
@@ -61,7 +61,7 @@ def load_custom() -> dict:
     out = {}
     for f in sorted(CUSTOM_DIR.glob("*.json")):
         try:
-            out[f.stem] = json.loads(f.read_text())
+            out[f.stem] = json.loads(f.read_text(encoding="utf-8"))
         except Exception:
             pass
     return out

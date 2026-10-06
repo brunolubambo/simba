@@ -55,13 +55,13 @@ class Observer:
             return None
 
     def log_activity(self, line: str):
-        with ACTIVITY.open("a") as f:
+        with ACTIVITY.open("a", encoding="utf-8") as f:
             f.write(f"- {datetime.now():%Y-%m-%d %H:%M} {line}\n")
-        lines = ACTIVITY.read_text().splitlines()[-300:]
-        ACTIVITY.write_text("\n".join(lines) + "\n")
+        lines = ACTIVITY.read_text(encoding="utf-8").splitlines()[-300:]
+        ACTIVITY.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def recent_activity(self, n: int = 15) -> str:
-        return "\n".join(ACTIVITY.read_text().splitlines()[-n:]) if ACTIVITY.exists() else "(sem registro)"
+        return "\n".join(ACTIVITY.read_text(encoding="utf-8").splitlines()[-n:]) if ACTIVITY.exists() else "(sem registro)"
 
     # ---------- captura e análise ----------
     def capture(self):
@@ -74,7 +74,7 @@ class Observer:
         prompt = (f"Registro recente:\n{self.recent_activity()}\n\n"
                   f"Sugestões já feitas (não repita): {self.recent_titles[-5:]}\n\n"
                   f"Leia a captura em {path} com a ferramenta Read e responda com o JSON.")
-        opts = ClaudeAgentOptions(system_prompt=(PROMPTS / "observer.md").read_text(), model=self.model,
+        opts = ClaudeAgentOptions(system_prompt=(PROMPTS / "observer.md").read_text(encoding="utf-8"), model=self.model,
                                   tools=["Read"], allowed_tools=["Read"], max_turns=3, cwd=str(WORKSPACE))
         out = []
         async for msg in query(prompt=prompt, options=opts):

@@ -30,7 +30,7 @@ def _creds(conta: str):
     c = Credentials.from_authorized_user_file(str(f), SCOPES)
     if not c.valid and c.refresh_token:
         c.refresh(Request())
-        f.write_text(c.to_json())
+        f.write_text(c.to_json(), encoding="utf-8")
     return c
 
 
@@ -264,7 +264,7 @@ def client_config() -> dict:
     f = GDIR / "credentials.json"
     if f.exists():
         import json
-        return json.loads(f.read_text())
+        return json.loads(f.read_text(encoding="utf-8"))
     raise RuntimeError("Configure GOOGLE_CLIENT_ID e GOOGLE_CLIENT_SECRET (veja o README).")
 
 
@@ -285,7 +285,7 @@ def finish_web_auth(state: str, code: str) -> tuple[str, str]:
     conta, flow = _FLOWS.pop(state)
     flow.fetch_token(code=code)
     f = GDIR / f"{conta}.json"
-    f.write_text(flow.credentials.to_json())
+    f.write_text(flow.credentials.to_json(), encoding="utf-8")
     email = _svc(conta, "gmail", "v1").users().getProfile(userId="me").execute()["emailAddress"]
     if email.lower() != ACCOUNTS[conta].lower():
         f.unlink()
@@ -301,7 +301,7 @@ def auth(conta: str):
         sys.exit("Coloque o credentials.json (OAuth, tipo 'App para computador') em data/google/. Veja o README.")
     flow = InstalledAppFlow.from_client_secrets_file(str(secret), SCOPES)
     creds = flow.run_local_server(port=0, login_hint=ACCOUNTS[conta], prompt="consent")
-    (GDIR / f"{conta}.json").write_text(creds.to_json())
+    (GDIR / f"{conta}.json").write_text(creds.to_json(), encoding="utf-8")
     email = _svc(conta, "gmail", "v1").users().getProfile(userId="me").execute()["emailAddress"]
     if email.lower() != ACCOUNTS[conta].lower():
         (GDIR / f"{conta}.json").unlink()

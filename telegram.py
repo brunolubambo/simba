@@ -41,13 +41,13 @@ def enabled() -> bool:
 
 def _load() -> dict:
     try:
-        return json.loads(STATE.read_text())
+        return json.loads(STATE.read_text(encoding="utf-8"))
     except Exception:
         return {}
 
 
 def _save(d: dict):
-    STATE.write_text(json.dumps(d, ensure_ascii=False))
+    STATE.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
 
 
 def chat_id() -> int | None:
