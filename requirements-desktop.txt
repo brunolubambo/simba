@@ -1,0 +1,5 @@
+# Dependências só do app de desktop no Windows.
+# O Railway continua usando requirements.txt. Não copie estes pacotes para lá.
+pywebview>=5.3
+pystray>=0.19
+pillow>=10.4
