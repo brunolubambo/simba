@@ -13,7 +13,9 @@ FREE = {"Read", "Glob", "Grep", "WebSearch", "WebFetch", "TodoWrite", "Task", "A
         "mcp__google__gmail_buscar", "mcp__google__gmail_ler", "mcp__google__gmail_rascunho",
         "mcp__google__gmail_marcar_lido", "mcp__google__agenda_listar",
         "mcp__google__drive_buscar", "mcp__google__drive_ler",
-        "mcp__squad__agente_criar", "mcp__squad__agente_listar"} | browser.FREE
+        "mcp__squad__agente_criar", "mcp__squad__agente_listar",
+        "mcp__rotinas__rotina_listar", "mcp__rotinas__rotina_criar", "mcp__rotinas__rotina_editar",
+        "mcp__rotinas__rotina_pausar", "mcp__rotinas__rotina_reativar"} | browser.FREE
 FREE_PREFIX = ("mcp__vida__",     # dados locais, reversíveis
                "mcp__telegram__",  # mensagens para o chat do próprio Bruno
                "mcp__docs__")      # documentos criados no workspace
@@ -58,6 +60,9 @@ def describe(tool: str, i: dict) -> str | None:
         return f"Remover evento {i.get('id')} da agenda {i.get('conta')}"
     if tool == "mcp__squad__agente_remover":
         return f"Remover o especialista '{i.get('id')}'"
+    if tool == "mcp__rotinas__rotina_apagar":
+        alvo = i.get("nome") or i.get("id") or "informada"
+        return f"Apagar a rotina '{alvo}'. Esta ação não tem volta."
     if tool == "mcp__celular__celular_acao" or tool.endswith("__celular_acao"):
         a = i.get("input") if isinstance(i.get("input"), dict) else i
         acao = str((a or {}).get("acao") or "").strip()

@@ -29,7 +29,7 @@ def agente_criar(a):
         raise ValueError(f"ferramentas desconhecidas: {bad}. Opções: {list(agents.PRESETS)}")
     (agents.CUSTOM_DIR / f"{aid}.json").write_text(json.dumps(
         {"rotulo": a["nome"], "descricao": a["descricao"], "instrucoes": a["instrucoes"], "ferramentas": ferr},
-        ensure_ascii=False, indent=2))
+        ensure_ascii=False, indent=2), encoding="utf-8")
     CHANGED["flag"] = True
     return f"Especialista '{a['nome']}' criado (id {aid}). Estará disponível a partir do próximo pedido."
 

@@ -40,6 +40,13 @@ body::after{content:"";position:fixed;inset:0;pointer-events:none;opacity:.35;
 #hudHealth{left:16px}
 #hudLink{right:16px}
 #hudLink.off{opacity:.35}
+#rotinas{position:absolute;right:16px;top:max(36px,calc(env(safe-area-inset-top) + 22px));z-index:2;
+  text-align:right;max-width:min(240px,46vw);pointer-events:none}
+#rotinas[hidden]{display:none}
+#rotinas .label{display:block;margin-bottom:4px}
+#rotinas div{font-family:Orbitron,sans-serif;font-size:9px;letter-spacing:.06em;color:rgba(191,243,255,.75);
+  text-transform:uppercase;line-height:1.45}
+#rotinas .off{opacity:.45}
 
 #caption{position:absolute;left:0;right:0;bottom:34px;z-index:3;padding:22px 18px 2px;text-align:center;pointer-events:none;
   background:linear-gradient(transparent,rgba(2,8,18,.82) 36%)}
@@ -92,6 +99,7 @@ footer{display:flex;gap:8px;padding:8px 12px;padding-bottom:max(8px,env(safe-are
 <section id="stage">
   <canvas id="core" aria-hidden="true"></canvas>
   <div id="hudMarks" aria-hidden="true"><span id="hudHealth">sistema</span><span id="hudLink" class="off">conexão</span></div>
+  <div id="rotinas" hidden aria-label="Rotinas programadas"></div>
   <div id="caption" aria-live="polite">
     <div id="heard"></div>
     <div id="said"></div>
@@ -458,7 +466,24 @@ function answerApproval(ok) {
 }
 
 // ---------- conexão com o servidor ----------
-let ws, turnText = [], outbox = [];
+let ws, turnText = [], outbox = [], speakTurn = true;
+function renderRotinas(itens) {
+  const el = $("#rotinas");
+  if (!el) return;
+  el.replaceChildren();
+  if (!itens || !itens.length) { el.hidden = true; return; }
+  el.hidden = false;
+  const titulo = document.createElement("div");
+  titulo.className = "label";
+  titulo.textContent = "Rotinas";
+  el.append(titulo);
+  for (const r of itens) {
+    const row = document.createElement("div");
+    if (!r.ativa) row.className = "off";
+    row.textContent = r.horario + "  " + r.nome + (r.ativa ? "" : "  ·  pausada");
+    el.append(row);
+  }
+}
 const shown = t => t.replace(/\*\*(.+?)\*\*/g, "$1").replace(/__(.+?)__/g, "$1").replace(/^#{1,6}\s*/gm, "");
 function showSaid(t) { const s = $("#said"); s.textContent = t; s.classList.toggle("long", t.length > 160); s.scrollTop = 0; }
 const online = () => ws && ws.readyState === 1;
@@ -491,18 +516,20 @@ function connect() {
   ws.onmessage = e => {
     const ev = JSON.parse(e.data);
     switch (ev.type) {
-      case "status": { const miss = Object.entries(ev.google || {}).filter(([, v]) => !v.ok).map(([c]) => c); setupNotice(miss, ev.telegram); break; }
+      case "status": { const miss = Object.entries(ev.google || {}).filter(([, v]) => !v.ok).map(([c]) => c); setupNotice(miss, ev.telegram); if (ev.rotinas) renderRotinas(ev.rotinas); break; }
+      case "rotinas": renderRotinas(ev.itens); break;
       case "user":
         turnOpen = true;
+        speakTurn = ev.falar !== false;
         if (ev.device !== DEVICE) { silenceNow(); voiced = ""; lastSaid = ""; }
         turnText = [];
         if (ev.device !== DEVICE) $("#heard").textContent = `› (${ev.device}) ${ev.text.slice(0, 120)}`;
         setState("thinking", ev.device === "proativo" ? "agindo por conta própria" : ev.device === "rotina" ? "rotina" : "processando"); break;
       case "agent": agentState(ev.id, ev.state === "working", ev.task); break;
       case "tool": $("#stateTxt").textContent = ev.name.replace(/_/g, " "); break;
-      case "text": absorbText(ev.text); showSaid(turnText.map(shown).join("\n\n")); if (turnOpen) speakNew(false); break;
+      case "text": absorbText(ev.text); showSaid(turnText.map(shown).join("\n\n")); if (turnOpen && speakTurn) speakNew(false); break;
       case "done": {
-        turnOpen = false; speakNew(true); turnText = []; voiced = "";
+        turnOpen = false; if (speakTurn) speakNew(true); turnText = []; voiced = "";
         document.querySelectorAll(".ag.on").forEach(d => agentState(d.id.slice(3), false));
         if (!sayBusy && !sayQueue.length) doneSpeaking();
         loadPanel(); break;
