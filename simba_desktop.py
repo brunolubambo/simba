@@ -59,6 +59,30 @@ user32.IsIconic.argtypes = [wintypes.HWND]
 user32.IsIconic.restype = wintypes.BOOL
 user32.BringWindowToTop.argtypes = [wintypes.HWND]
 user32.BringWindowToTop.restype = wintypes.BOOL
+user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+user32.SetWindowPos.argtypes = [
+    wintypes.HWND,
+    wintypes.HWND,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    wintypes.UINT,
+]
+user32.SetWindowPos.restype = wintypes.BOOL
+
+GWL_EXSTYLE = -20
+WS_EX_TOOLWINDOW = 0x00000080
+WS_EX_APPWINDOW = 0x00040000
+SWP_NOMOVE = 0x0002
+SWP_NOSIZE = 0x0001
+SWP_NOZORDER = 0x0004
+SWP_NOACTIVATE = 0x0010
+SWP_FRAMECHANGED = 0x0020
+WINDOW_BG = "#020812"
 
 
 class App:
@@ -79,6 +103,9 @@ class App:
         self.saved = None
         self.done = threading.Event()
         self.keep: list = []
+        self.webview_retried = False
+        self.reloaded = False
+        self.want_taskbar_hidden = False
 
 
 app = App()
@@ -625,6 +652,25 @@ def install_microphone(origin: str) -> None:
 
     def on_webview_ready(self, sender, args):
         try:
+            if not args.IsSuccess:
+                if not app.webview_retried:
+                    app.webview_retried = True
+                    log.error(
+                        "O WebView2 não abriu a janela: %s. Tentando criar o controlador de novo.",
+                        args.InitializationException,
+                    )
+                    try:
+                        self.webview.EnsureCoreWebView2Async(None)
+                    except Exception:
+                        log.exception("segunda tentativa do WebView2")
+                else:
+                    log.error(
+                        "O WebView2 falhou de novo (%s). A janela fica sem o HUD. "
+                        "O Microsoft Edge não está instalado neste PC, só o WebView2 Runtime, "
+                        "então não há o modo Edge --app.",
+                        args.InitializationException,
+                    )
+                return original(self, sender, args)
             if args.IsSuccess:
                 core = sender.CoreWebView2
 
@@ -655,6 +701,8 @@ def install_microphone(origin: str) -> None:
                 except Exception:
                     log.exception("perfil do microfone")
                 log.info("microfone do WebView2 permitido de forma persistente")
+                if app.want_taskbar_hidden:
+                    _ui(self.form, lambda: taskbar_button(self.form, False))
         except Exception:
             log.exception("não preparei o microfone")
         return original(self, sender, args)
@@ -674,24 +722,61 @@ def _ui(form, fn) -> None:
         fn()
 
 
+def webview_alive(form) -> bool:
+    ctl = getattr(form, "webview", None)
+    if ctl is None:
+        return False
+    try:
+        return ctl.CoreWebView2 is not None
+    except Exception:
+        return False
+
+
+def taskbar_button(form, show: bool) -> None:
+    """Tira ou devolve o botão da barra sem recriar o HWND.
+
+    ShowInTaskbar recria a janela e aborta o WebView2 com E_ABORT (0x80004004).
+    """
+    hwnd = int(form.Handle.ToInt64())
+    style = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+    if show:
+        style = (style | WS_EX_APPWINDOW) & ~WS_EX_TOOLWINDOW
+    else:
+        style = (style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
+    user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style)
+    user32.SetWindowPos(
+        hwnd,
+        None,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+    )
+
+
 def conceal_form(form, remember: bool) -> None:
     import System.Windows.Forms as WinForms
     from System.Drawing import Point
 
     if remember and form.Location.X > -16000:
         app.saved = (form.Location.X, form.Location.Y, form.WindowState)
-    form.ShowInTaskbar = False
+    app.want_taskbar_hidden = True
     if form.WindowState != WinForms.FormWindowState.Normal:
         form.WindowState = WinForms.FormWindowState.Normal
     form.Location = Point(-30000, -30000)
+    if webview_alive(form):
+        taskbar_button(form, False)
 
 
 def reveal_form(form) -> None:
     import System.Windows.Forms as WinForms
     from System.Drawing import Point
 
-    on_screen = bool(form.ShowInTaskbar) and form.Location.X > -16000
-    form.ShowInTaskbar = True
+    on_screen = form.Location.X > -16000
+    app.want_taskbar_hidden = False
+    if webview_alive(form):
+        taskbar_button(form, True)
     if on_screen:
         if form.WindowState == WinForms.FormWindowState.Minimized:
             form.WindowState = WinForms.FormWindowState.Normal
@@ -754,18 +839,6 @@ def reveal(origin: str) -> None:
         _ui(form, lambda: reveal_form(form))
     except Exception:
         log.exception("mostrar janela")
-
-
-def on_before_show() -> None:
-    if not app.oculto or app.window is None:
-        return
-    form = getattr(app.window, "native", None)
-    if form is None:
-        return
-    try:
-        form.ShowInTaskbar = False
-    except Exception:
-        log.exception("início oculto")
 
 
 def kick_webview(form) -> None:
@@ -844,6 +917,35 @@ def on_closing():
     return False
 
 
+def page_has_content() -> bool:
+    window = app.window
+    if window is None:
+        return False
+    try:
+        count = window.evaluate_js("(document.body && (document.body.innerText || '').trim().length) || 0")
+    except Exception:
+        log.exception("não conferi se a página abriu")
+        return True
+    try:
+        return int(count or 0) > 0
+    except (TypeError, ValueError):
+        return bool(count)
+
+
+def reload_if_empty() -> None:
+    time.sleep(0.8)
+    if app.quitting or app.reloaded or app.window is None:
+        return
+    if page_has_content():
+        return
+    app.reloaded = True
+    log.warning("a página abriu vazia; recarregando uma vez")
+    try:
+        app.window.load_url(app.url)
+    except Exception:
+        log.exception("recarregar página")
+
+
 def on_loaded() -> None:
     log.info("HUD carregado")
     form = getattr(app.window, "native", None) if app.window is not None else None
@@ -852,6 +954,7 @@ def on_loaded() -> None:
             _ui(form, lambda: kick_webview(form))
         except Exception:
             log.exception("ajustar WebView2")
+    threading.Thread(target=reload_if_empty, name="simba-reload", daemon=True).start()
     if not app.muted or app.window is None:
         return
     try:
@@ -894,12 +997,11 @@ def run_webview(ico: Path) -> None:
         x=-30000 if app.oculto else None,
         y=-30000 if app.oculto else None,
         min_size=(960, 640),
-        background_color="#020812",
+        background_color=WINDOW_BG,
         text_select=True,
         confirm_close=False,
     )
     app.window = window
-    window.events.before_show += on_before_show
     window.events.shown += on_shown
     window.events.restored += on_restored
     window.events.closing += on_closing
@@ -1049,10 +1151,20 @@ def main(argv: list[str] | None = None) -> int:
                 run_webview(ico)
                 return 0
             except Exception:
-                log.exception("pywebview falhou; usando o Edge")
+                log.exception("pywebview falhou ao abrir a janela")
         else:
-            log.info("WebView2 não encontrado")
-        run_edge()
+            log.error("WebView2 Runtime não encontrado")
+        if find_edge() is None:
+            log.error(
+                "A janela não abriu. O WebView2 falhou e o Microsoft Edge não está instalado neste computador. "
+                "Só existe o WebView2 Runtime, então o modo Edge --app não funciona aqui. O servidor continua na bandeja."
+            )
+            app.done.wait()
+            return 0
+        try:
+            run_edge()
+        except Exception:
+            log.exception("não abri o Edge")
         return 0
     finally:
         shutdown()
