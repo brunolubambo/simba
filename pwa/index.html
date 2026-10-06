@@ -403,6 +403,7 @@ function afterWake(t) {  // frase inteira depois da ativação, ou null se ela n
 }
 function startListening() { if (!SR || speaking || !wantListen) return; try { rec.start(); } catch {} }
 function stopListening() { if (rec) try { rec.abort(); } catch {} }
+window.simbaSetListen = on => { wantListen = !!on; if (wantListen) startListening(); else stopListening(); };
 if (SR) {
   rec = new SR(); rec.lang = "pt-BR"; rec.continuous = true; rec.interimResults = true;
   rec.onstart = () => {
@@ -466,7 +467,7 @@ function answerApproval(ok) {
 }
 
 // ---------- conexão com o servidor ----------
-let ws, turnText = [], outbox = [], speakTurn = true;
+let ws, turnText = [], outbox = [], speakTurn = true, reconnectTimer = 0;
 function renderRotinas(itens) {
   const el = $("#rotinas");
   if (!el) return;
@@ -511,7 +512,8 @@ function connect() {
     if (!opened) {
       try { const r = await fetch(`/painel?token=${T()}`); if (r.status === 401) return rejectToken(); } catch {}
     }
-    setTimeout(connect, 2000);
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connect, 2000);
   };
   ws.onmessage = e => {
     const ev = JSON.parse(e.data);
@@ -640,8 +642,27 @@ if (TOKEN) {
   if (store.get("activated") && SR) { startListening(); navigator.wakeLock?.request("screen").catch(() => {}); setupPush().catch(() => {}); }
   else showWake();
 }
+function ensureLink() {
+  if (!TOKEN) return;
+  if (ws && ws.readyState === WebSocket.CONNECTING) return;
+  if (online()) return;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(connect, 400);
+}
+function relinkAfterWake() {
+  if (!TOKEN) return;
+  if (ws && ws.readyState === WebSocket.OPEN) { try { ws.close(); } catch {} return; }
+  ensureLink();
+}
+window.addEventListener("online", relinkAfterWake);
+document.addEventListener("resume", relinkAfterWake);
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") { navigator.wakeLock?.request("screen").catch(() => {}); startListening(); loadPanel(); }
+  if (document.visibilityState === "visible") {
+    navigator.wakeLock?.request("screen").catch(() => {});
+    ensureLink();
+    startListening();
+    loadPanel();
+  }
 });
 </script>
 </body>
