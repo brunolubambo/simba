@@ -32,7 +32,7 @@ Para subir já escondido, como no logon:
 .\.venv\Scripts\pythonw.exe simba_desktop.py --oculto
 ```
 
-O microfone fica permitido no perfil do WebView2 (`data/webview2`), sem pedir de novo. Se o pywebview ou o WebView2 não estiverem disponíveis, o log avisa e o app abre o Edge com `--app` num perfil separado (`data/edge-profile`).
+O microfone fica permitido no perfil do WebView2 (`data/webview2`), sem pedir de novo. A janela usa o fundo escuro do HUD. Se o WebView2 não abrir, o motivo fica em `data/logs/desktop.log`. Sem o Microsoft Edge instalado, o app não tenta `Edge --app`.
 
 ## Início automático
 
