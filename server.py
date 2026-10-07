@@ -6,7 +6,7 @@ HTTP: POST /upload?token= (imagem do celular, ex.: Atalho do iOS) | POST /push/s
       POST /tts?token= ({text} -> {id}) + GET /tts/{id}?token= (voz neural em MP3, transmitida) | POST /telegram/webhook (mensagens do bot, ver telegram.py)
       POST /celular/resultado?token= , GET /celular/proximo?token= e POST /celular/foto?token=&id= (o app confirma um comando, ver celular.py)
       GET /pc/proximo e POST /pc/resultado (agente local do PC pessoal, ver pc.py)"""
-import asyncio, json, os, re, secrets, time
+import asyncio, json, logging, os, re, secrets, time
 from datetime import date
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -22,6 +22,8 @@ from . import tasks, life, google, memory, telegram, celular, pc
 from .agents import roster
 
 TOKEN = os.getenv("SIMBA_TOKEN", "")
+# Janela de troca: vazio ou ausente = só o código atual. Nunca aceita valor vazio.
+TOKEN_ANTERIOR = os.getenv("SIMBA_TOKEN_ANTERIOR", "").strip()
 AUTO_ACT = os.getenv("SIMBA_AUTO", "true").lower() == "true"     # executa sugestões sem pedir clique
 VOICE = os.getenv("SIMBA_VOICE", "pt-BR-AntonioNeural")          # voz neural usada pelo app (edge-tts)
 VOICE_RATE = os.getenv("SIMBA_VOICE_RATE", "-4%")               # velocidade: ex. "+0%", "-10%"
@@ -31,8 +33,59 @@ hub = Hub()
 state: dict = {}
 
 
+_TOKEN_NO_LOG = re.compile(r"token=[^&\s\"]*")
+
+
+def _redigir_token(texto: str) -> str:
+    return _TOKEN_NO_LOG.sub("token=***", texto)
+
+
+class RedactTokenFilter(logging.Filter):
+    """Troca token=... por token=*** em args e na mensagem, sem desmontar a linha."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = _redigir_token(record.msg)
+        args = record.args
+        if isinstance(args, tuple):
+            record.args = tuple(_redigir_token(a) if isinstance(a, str) else a for a in args)
+        elif isinstance(args, dict):
+            record.args = {k: _redigir_token(v) if isinstance(v, str) else v for k, v in args.items()}
+        pronta = getattr(record, "message", None)
+        if isinstance(pronta, str):
+            record.message = _redigir_token(pronta)
+        return True
+
+
+def install_token_log_filter() -> None:
+    """Liga o filtro nos loggers que o uvicorn usa ao subir pelo Dockerfile.
+
+    Config.__init__ chama configure_logging() e só depois importa simba.server:app.
+    O filtro entra aqui, depois dessa configuração, e permanece no processo
+    (o CMD não usa --workers nem --reload). A linha HTTP vai para uvicorn.access.
+    A linha WebSocket ("WebSocket /ws?token=") vai para uvicorn.error.
+    """
+    filtro = RedactTokenFilter()
+    for nome in ("uvicorn.access", "uvicorn.error"):
+        log = logging.getLogger(nome)
+        if not any(isinstance(f, RedactTokenFilter) for f in log.filters):
+            log.addFilter(filtro)
+
+
+install_token_log_filter()
+
+
+def token_aceito(token: str) -> bool:
+    """SIMBA_TOKEN, ou também SIMBA_TOKEN_ANTERIOR durante a troca. Vazio não passa."""
+    if not token or not TOKEN:
+        return False
+    if secrets.compare_digest(token, TOKEN):
+        return True
+    return bool(TOKEN_ANTERIOR) and secrets.compare_digest(token, TOKEN_ANTERIOR)
+
+
 def check(token: str):
-    if not TOKEN or not secrets.compare_digest(token, TOKEN):
+    if not token_aceito(token):
         raise HTTPException(401, "token inválido")
 
 
@@ -116,7 +169,7 @@ app = FastAPI(title="Simba", lifespan=lifespan)
 
 @app.websocket("/ws")
 async def ws(socket: WebSocket, token: str = "", device: str = "pc"):
-    if not TOKEN or not secrets.compare_digest(token, TOKEN):
+    if not token_aceito(token):
         await socket.close(code=4401)
         return
     await socket.accept()
