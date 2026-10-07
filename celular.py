@@ -7,6 +7,7 @@ a ferramenta não diz que executou. Firebase no telefone não é necessário.
 Variáveis (Railway → Variables):
   CELULAR_APP           true (padrão) liga a ferramenta sem Firebase
   CELULAR_TOKEN         token que o app manda de volta (se vazio, usa SIMBA_TOKEN)
+  SIMBA_TOKEN_ANTERIOR  opcional; na troca, o celular também aceita este código antigo
   CELULAR_TIMEOUT_S     segundos de espera pela confirmação (padrão: 45)
   FCM_PROJECT_ID / FCM_SERVICE_ACCOUNT / CELULAR_FCM_TOKEN  opcionais, só se quiser push
 
@@ -73,9 +74,20 @@ def verdade(v) -> bool:
 
 
 def token_ok(token: str) -> bool:
-    """O retorno do app usa CELULAR_TOKEN, ou o SIMBA_TOKEN se aquele estiver vazio."""
+    """CELULAR_TOKEN, ou o SIMBA_TOKEN se aquele estiver vazio.
+
+    Com SIMBA_TOKEN_ANTERIOR definido, o código antigo também passa.
+    Valor vazio nunca passa, nem o anterior se estiver em branco.
+    """
+    if not token:
+        return False
     expected = os.getenv("CELULAR_TOKEN", "").strip() or os.getenv("SIMBA_TOKEN", "").strip()
-    return bool(expected) and bool(token) and secrets.compare_digest(token, expected)
+    if not expected:
+        return False
+    if secrets.compare_digest(token, expected):
+        return True
+    anterior = os.getenv("SIMBA_TOKEN_ANTERIOR", "").strip()
+    return bool(anterior) and secrets.compare_digest(token, anterior)
 
 
 def resumo(a: dict) -> str:
