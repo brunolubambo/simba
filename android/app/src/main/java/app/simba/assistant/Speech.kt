@@ -8,6 +8,10 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 
 object Speech {
+    /** Modo conversa: quem aprende um idioma pausa para pensar. Ajuste aqui. */
+    const val CONVERSA_SILENCIO_COMPLETO_MS = 1500L
+    const val CONVERSA_SILENCIO_POSSIVEL_MS = 1200L
+
     fun recognizer(context: Context): SpeechRecognizer? {
         if (!SpeechRecognizer.isRecognitionAvailable(context)) return null
         val component = component(context)
@@ -20,6 +24,14 @@ object Speech {
         putExtra(RecognizerIntent.EXTRA_LANGUAGE, "pt-BR")
         putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
         putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+    }
+
+    /** Reconhecedor do modo conversa: idioma da prática e silêncio de fim de fala mais tolerante. */
+    fun conversaIntent(language: String): Intent = intent().apply {
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, language)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, CONVERSA_SILENCIO_COMPLETO_MS)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, CONVERSA_SILENCIO_POSSIVEL_MS)
     }
 
     private fun component(context: Context): ComponentName? {

@@ -14,6 +14,7 @@ from .tasks import routines_server
 from .telegram import telegram_server
 from .documentos import docs_server
 from . import browser, celular, pc
+from .conversa import conversa_server
 
 Approver = Callable[[str], Awaitable[bool]]
 AGENT_TOOLS = ("Task", "Agent")
@@ -94,7 +95,8 @@ class Simba:
         memory = load_context()
         system = prompt + "\n\n# Memória\n" + memory
         servers = {"memory": memory_server, "google": google_server, "vida": life_server, "squad": squad_server,
-                   "telegram": telegram_server, "docs": docs_server, "rotinas": routines_server}
+                   "telegram": telegram_server, "docs": docs_server, "rotinas": routines_server,
+                   "conversa": conversa_server}
         if os.getenv("OBSERVER_ENABLED", "true").lower() == "true":
             servers["vision"] = vision_server
         if celular.enabled():
@@ -176,6 +178,7 @@ class Simba:
         """Eventos: text | tool | agent (working/idle) | done."""
         t0 = time.perf_counter()
         async with self._lock:
+            print(f"[perf] {time.strftime('%H:%M:%S')} espera pelo _lock +{time.perf_counter() - t0:.2f}s", flush=True)
             if CHANGED["flag"]:
                 await self.reload()
             if MAX_SESSION_TURNS > 0 and self._turns >= MAX_SESSION_TURNS:

@@ -2,6 +2,7 @@
 WebSocket /ws?token=...&device=pc|celular
   entrada: {type:message,text} | {type:approve,id,ok} | {type:accept,id} | {type:dismiss,id} | {type:reminder_snooze,id,min} | {type:observer,on}
   saída:   text | tool | done | approval | approval_closed | suggestion | activity | status | rotinas | error
+           modo conversa (só celular com &recursos=conversa): modo {ativo,stt,voz,idioma} | frase {text,idioma,voz} | done {conversa:true}
 HTTP: POST /upload?token= (imagem do celular, ex.: Atalho do iOS) | POST /push/subscribe | GET /push/key
       POST /tts?token= ({text} -> {id}) + GET /tts/{id}?token= (voz neural em MP3, transmitida) | POST /telegram/webhook (mensagens do bot, ver telegram.py)
       POST /celular/resultado?token= , GET /celular/proximo?token= e POST /celular/foto?token=&id= (o app confirma um comando, ver celular.py)
@@ -18,7 +19,7 @@ from .config import ROOT, WORKSPACE, ACCOUNTS, public_url
 from .core import Simba
 from .hub import Hub, save_sub, send_push, vapid, PUSH_TOO
 from .observer import Observer
-from . import tasks, life, google, memory, telegram, celular, pc
+from . import tasks, life, google, memory, telegram, celular, pc, conversa, perfil
 from .agents import roster
 
 TOKEN = os.getenv("SIMBA_TOKEN", "")
@@ -89,21 +90,101 @@ def check(token: str):
         raise HTTPException(401, "token inválido")
 
 
-async def run_and_broadcast(text: str, origin: str, canal: str | None = None, voice: bool = False):
+CONVERSAS: dict = {}      # WebSocket do celular -> conversa.Sessao (modo conversa ativo naquela conexão)
+
+
+def _modo(sessao, ativo: bool) -> dict:
+    if ativo:
+        return {"type": "modo", "ativo": True, "stt": sessao.bcp47, "voz": sessao.voz, "idioma": sessao.idioma_alvo}
+    return {"type": "modo", "ativo": False, "stt": perfil.carregar()["idioma_nativo"], "voz": VOICE, "idioma": "português"}
+
+
+async def _ativar_conversa(socket):
+    """Fim da resposta do agente: se ele chamou iniciar_modo_conversa, liga o modo nesta conexão."""
+    pedido = conversa.tomar_pedido()
+    if not pedido:
+        return None, ""
+    if socket is None:
+        return None, "O modo conversa só funciona no app SIMBA do celular, versão 1.5 ou mais nova."
+    sessao = conversa.criar_sessao(pedido)
+    CONVERSAS[socket] = sessao
+    print(f"[conversa] início idioma={sessao.bcp47} nivel={sessao.nivel} correcao={sessao.correcao}", flush=True)
+    await socket.send_json(_modo(sessao, True))
+    return sessao, ""
+
+
+async def _sair_conversa(socket, sessao) -> None:
+    if CONVERSAS.get(socket) is sessao:
+        CONVERSAS.pop(socket, None)
+    print("[conversa] fim", flush=True)
+    try:
+        await socket.send_json(_modo(sessao, False))
+    except Exception:
+        pass
+
+
+async def conversa_mensagem(socket, sessao, texto: str | None):
+    """Caminho rápido do modo conversa: direto ao modelo, sem o _lock do agente."""
+    async def enviar(ev):
+        await socket.send_json(ev)
+
+    try:
+        r = await conversa.turno(sessao, texto, enviar)
+    except Exception as e:
+        print(f"[conversa] falha no turno ({type(e).__name__}), voltando ao modo normal", flush=True)
+        await _sair_conversa(socket, sessao)
+        conversa.fechar(sessao, "falha")
+        try:
+            await enviar({"type": "frase", "text": "Tive um problema, voltei ao modo normal.", "idioma": "pt-BR", "voz": VOICE})
+            await enviar({"type": "done", "conversa": True})
+        except Exception:
+            pass
+        return
+    if not r["fim"]:
+        return
+    await _sair_conversa(socket, sessao)
+    outro = bool(r["outro"] and texto)
+    try:
+        await conversa.feedback(sessao, texto or "", enviar, VOICE, outro)
+    except Exception as e:
+        print(f"[conversa] falha no feedback ({type(e).__name__})", flush=True)
+        try:
+            await enviar({"type": "frase", "text": "Não consegui preparar o feedback agora.", "idioma": "pt-BR", "voz": VOICE})
+            await enviar({"type": "done", "conversa": True, "encaminhado": outro})
+        except Exception:
+            pass
+    conversa.fechar(sessao, "pedido alheio" if outro else "fim")
+    if outro:
+        await run_and_broadcast(texto, "celular", voice=True, socket=socket)
+
+
+async def run_and_broadcast(text: str, origin: str, canal: str | None = None, voice: bool = False, socket=None):
     user = {"type": "user", "text": text, "device": origin}
     if canal:
         user["canal"] = canal
     if canal == "HUD":
         user["falar"] = False
+    t_ini = time.perf_counter()
     await hub.broadcast(user)
     if voice:
         text = "[por voz: 1 ou 2 frases, sem markdown, pronto para falar]\n" + text
+    texto_enviado = False
+    sessao_nova = None
     final: list[str] = []                    # texto depois da última ferramenta = a resposta final
     try:
         async for ev in state["simba"].ask(text):
-            await hub.broadcast(ev)
             kind = ev.get("type")
+            if kind == "done":
+                sessao_nova, aviso = await _ativar_conversa(socket)
+                if aviso:
+                    await hub.broadcast({"type": "text", "text": aviso})
+                    final.append(aviso)
+            await hub.broadcast(ev)
             if kind == "text":
+                if not texto_enviado:
+                    texto_enviado = True
+                    print(f"[perf] {time.strftime('%H:%M:%S')} primeiro text enviado "
+                          f"+{time.perf_counter() - t_ini:.2f}s desde o pedido voice={voice}", flush=True)
                 final.append(ev["text"])
             elif kind == "tool" or (kind == "agent" and ev.get("state") == "working"):
                 final = []
@@ -123,9 +204,12 @@ async def run_and_broadcast(text: str, origin: str, canal: str | None = None, vo
         if origin == "rotina" and last and canal in (None, "Telegram") and (not sent or PUSH_TOO):
             await asyncio.to_thread(send_push, {"titulo": "SIMBA", "motivo": last})
     except Exception as e:
+        conversa.tomar_pedido()
         await hub.broadcast({"type": "error", "text": str(e)})
         if origin == "telegram":
             await telegram.deliver(f"Não consegui concluir: {e}"[:500], origin)
+    if sessao_nova is not None:
+        await conversa_mensagem(socket, sessao_nova, None)
 
 
 def status() -> dict:
@@ -168,11 +252,13 @@ app = FastAPI(title="Simba", lifespan=lifespan)
 
 
 @app.websocket("/ws")
-async def ws(socket: WebSocket, token: str = "", device: str = "pc"):
+async def ws(socket: WebSocket, token: str = "", device: str = "pc", recursos: str = ""):
     if not token_aceito(token):
         await socket.close(code=4401)
         return
     await socket.accept()
+    # Modo conversa só no app do celular que sabe tocar os eventos "frase" e "modo".
+    alvo_conversa = socket if device == "celular" and "conversa" in recursos.split(",") else None
     hub.add(socket, device)
     await hub.broadcast(status())
     tasks = set()
@@ -188,8 +274,15 @@ async def ws(socket: WebSocket, token: str = "", device: str = "pc"):
                     await socket.send_json({"type": "ack", "t": data.get("t")})
                 except Exception:
                     pass
-                print(f"[perf] {time.strftime('%H:%M:%S')} ws recebida (ack imediato, modelo ainda não começou)", flush=True)
-                t = asyncio.create_task(run_and_broadcast(data["text"], device, voice=bool(data.get("voice"))))
+                sessao = CONVERSAS.get(socket)
+                if sessao is not None:
+                    print(f"[perf] {time.strftime('%H:%M:%S')} ws recebida (ack imediato) modo=conversa", flush=True)
+                    t = asyncio.create_task(conversa_mensagem(socket, sessao, data["text"]))
+                else:
+                    print(f"[perf] {time.strftime('%H:%M:%S')} ws recebida (ack imediato, modelo ainda não começou) "
+                          f"voice={bool(data.get('voice'))}", flush=True)
+                    t = asyncio.create_task(run_and_broadcast(data["text"], device, voice=bool(data.get("voice")),
+                                                              socket=alvo_conversa))
                 tasks.add(t); t.add_done_callback(tasks.discard)
             elif kind == "approve":
                 hub.resolve(data.get("id", ""), data.get("ok", False))
@@ -209,6 +302,9 @@ async def ws(socket: WebSocket, token: str = "", device: str = "pc"):
         pass
     finally:
         hub.remove(socket)
+        sessao = CONVERSAS.pop(socket, None)
+        if sessao is not None:
+            conversa.fechar(sessao, "desconectou")
         await hub.broadcast(status())
 
 
@@ -392,20 +488,24 @@ def speech_pieces(text: str, limit: int = 1800) -> list[str]:
     return [p for p in parts if p]
 
 
-TTS_JOBS: dict[str, str] = {}
+TTS_JOBS: dict[str, tuple[str, str]] = {}
 
 
 @app.post("/tts")
 async def tts(body: dict = Body(...), token: str = Query("")):
-    """Guarda a fala e devolve um id. O player abre GET /tts/{id}, que toca enquanto o áudio ainda chega."""
+    """Guarda a fala e devolve um id. O player abre GET /tts/{id}, que toca enquanto o áudio ainda chega.
+    "voz" é opcional: sem ela, a voz padrão; com ela, só um ShortName da lista do edge-tts."""
     check(token)
     text = str(body.get("text", "")).strip()
     if not text:
         raise HTTPException(400, "texto vazio")
+    voz = str(body.get("voz") or "").strip() or VOICE
+    if voz != VOICE and not await conversa.voz_valida(voz):
+        raise HTTPException(400, "voz inválida")
     while len(TTS_JOBS) >= 20:
         TTS_JOBS.pop(next(iter(TTS_JOBS)))
     job = secrets.token_urlsafe(12)
-    TTS_JOBS[job] = text
+    TTS_JOBS[job] = (text, voz)
     return {"id": job}
 
 
@@ -413,16 +513,29 @@ async def tts(body: dict = Body(...), token: str = Query("")):
 async def tts_stream(job: str, token: str = Query("")):
     """Voz neural em MP3, enviada pedaço a pedaço. Se falhar antes do primeiro pedaço, o app usa a voz do celular."""
     check(token)
-    text = TTS_JOBS.pop(job, None)
-    if not text:
+    pedido = TTS_JOBS.pop(job, None)
+    if not pedido:
         raise HTTPException(404, "fala expirada")
+    text, voz = pedido
+    # Ritmo e tom configurados valem para a voz padrão; as outras vozes usam o natural.
+    rate, pitch = (VOICE_RATE, VOICE_PITCH) if voz == VOICE else ("+0%", "+0Hz")
 
     async def audio():
         import edge_tts
+        t0 = time.perf_counter()
+        t_first = None
+        total = 0
         for piece in speech_pieces(text):
-            async for chunk in edge_tts.Communicate(piece, VOICE, rate=VOICE_RATE, pitch=VOICE_PITCH).stream():
+            async for chunk in edge_tts.Communicate(piece, voz, rate=rate, pitch=pitch).stream():
                 if chunk["type"] == "audio":
+                    if t_first is None:
+                        t_first = time.perf_counter() - t0
+                        print(f"[perf] {time.strftime('%H:%M:%S')} tts primeiro chunk +{t_first:.2f}s "
+                              f"chars={len(text)}", flush=True)
+                    total += len(chunk["data"])
                     yield chunk["data"]
+        print(f"[perf] {time.strftime('%H:%M:%S')} tts último chunk +{time.perf_counter() - t0:.2f}s "
+              f"bytes={total}", flush=True)
 
     chunks = audio()
     try:
@@ -436,6 +549,13 @@ async def tts_stream(job: str, token: str = Query("")):
             yield data
 
     return StreamingResponse(body(), media_type="audio/mpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/uso")
+def uso(token: str = Query("")):
+    """Totais do modo conversa desde que o servidor subiu (tokens, turnos, minutos). Sem texto."""
+    check(token)
+    return conversa.uso_total(len(CONVERSAS))
 
 
 @app.get("/health")
