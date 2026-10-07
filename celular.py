@@ -200,6 +200,23 @@ def proximo() -> dict | None:
     return None
 
 
+def _limpo(texto, limite: int = 200) -> str:
+    """Uma linha só, sem quebras, para o log do servidor."""
+    return " ".join(str(texto or "").split())[:limite]
+
+
+def _enviado(dados: dict) -> str:
+    """O que o servidor mandou ao app (nunca o token: ele não faz parte dos dados)."""
+    partes = [f"{c}={_limpo(dados[c], 60)!r}" for c in ("hora", "etiqueta", "app", "camera") if dados.get(c)]
+    return (" enviado: " + " ".join(partes)) if partes else ""
+
+
+def _linha_log(acao: str, dados: dict, cmd: str, sucesso: bool, detalhe: str) -> str:
+    """'[celular] alarme: ok id=… enviado: hora='10:41' detalhe: …'. App antigo: detalhe vazio."""
+    return (f"[celular] {acao}: {'ok' if sucesso else 'erro'} id={cmd}" + _enviado(dados)
+            + (f" detalhe: {_limpo(detalhe)!r}" if detalhe else " detalhe: (nenhum)"))
+
+
 async def executar(a: dict) -> str:
     dados = _prepara(a)
     acao = dados["acao"]
@@ -216,7 +233,7 @@ async def executar(a: dict) -> str:
             await asyncio.to_thread(_push, {**dados, "cmd": cmd})
         sucesso, detalhe = await asyncio.wait_for(fut, WAIT)
     except asyncio.TimeoutError:
-        print(f"[celular] {acao}: sem resposta do aparelho")
+        print(f"[celular] {acao}: sem resposta do aparelho id={cmd}" + _enviado(dados))
         raise RuntimeError(
             "o comando foi enviado mas o celular não confirmou, então NÃO foi executado. "
             "Deixe o app SIMBA ouvindo, com internet, e sem hibernação da bateria") from None
@@ -229,7 +246,7 @@ async def executar(a: dict) -> str:
         raise RuntimeError(f"não consegui falar com o celular ({type(e).__name__})") from None
     finally:
         _jobs.pop(cmd, None)
-    print(f"[celular] {acao}: {'ok' if sucesso else 'erro'}")
+    print(_linha_log(acao, dados, cmd, sucesso, detalhe))
     if not sucesso:
         raise RuntimeError(f"o celular recebeu o comando e não conseguiu executar: {detalhe or 'o app não disse o motivo'}")
     extra = f" {detalhe}" if detalhe else ""

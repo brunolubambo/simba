@@ -3,6 +3,7 @@ package app.simba.assistant
 import android.content.Intent
 import android.os.Bundle
 import android.provider.AlarmClock
+import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
 
 /** Tenta gravar também no Relógio da Samsung. O alarme real já foi agendado pelo SIMBA. */
@@ -23,7 +24,9 @@ class AlarmActivity : AppCompatActivity() {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             try {
                 startActivity(clock)
-            } catch (_: Exception) {
+                Log.i(AlarmOverlay.TAG, "toque na notificacao: ACTION_SET_ALARM enviado hora=$hora")
+            } catch (e: Exception) {
+                Log.w(AlarmOverlay.TAG, "toque na notificacao: ACTION_SET_ALARM falhou (${e.javaClass.simpleName})")
             }
         }
         finish()

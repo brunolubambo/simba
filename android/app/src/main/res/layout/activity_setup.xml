@@ -68,5 +68,23 @@
             android:layout_marginTop="20dp"
             android:textColor="@color/white"
             android:textSize="15sp" />
+
+        <TextView
+            android:id="@+id/overlay_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:textColor="@color/white"
+            android:textSize="15sp" />
+
+        <Button
+            android:id="@+id/overlay_grant"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/button_bg"
+            android:backgroundTint="@null"
+            android:text="@string/overlay_grant"
+            android:textColor="@color/white" />
     </LinearLayout>
 </ScrollView>

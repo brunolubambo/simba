@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import android.speech.SpeechRecognizer
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
@@ -36,6 +37,11 @@ class SetupActivity : AppCompatActivity() {
         continueSetup()
     }
     private val battery = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        step = Step.OVERLAY
+        continueSetup()
+    }
+    private val overlay = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        showOverlayStatus()
         begin()
     }
 
@@ -49,6 +55,23 @@ class SetupActivity : AppCompatActivity() {
         token.setText(Prefs.token(this))
         if (Prefs.listening(this)) status.setText(R.string.listening_note)
         findViewById<Button>(R.id.start).setOnClickListener { activate() }
+        findViewById<Button>(R.id.overlay_grant).setOnClickListener { overlay.launch(overlayIntent()) }
+        showOverlayStatus()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        showOverlayStatus()
+    }
+
+    private fun overlayIntent() =
+        Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+
+    /** Mostra se "Aparecer sobre outros apps" está concedido; o botão some quando estiver. */
+    private fun showOverlayStatus() {
+        val granted = Settings.canDrawOverlays(this)
+        findViewById<TextView>(R.id.overlay_status).setText(if (granted) R.string.overlay_granted else R.string.overlay_missing)
+        findViewById<Button>(R.id.overlay_grant).visibility = if (granted) View.GONE else View.VISIBLE
     }
 
     private fun activate() {
@@ -118,6 +141,16 @@ class SetupActivity : AppCompatActivity() {
                     battery.launch(intent)
                     return
                 }
+                step = Step.OVERLAY
+                continueSetup()
+            }
+            Step.OVERLAY -> {
+                // "Aparecer sobre outros apps": deixa o SIMBA criar o alarme no Relógio sem você tocar em nada.
+                // Se negar, o app segue com o aviso para tocar.
+                if (!Settings.canDrawOverlays(this)) {
+                    overlay.launch(overlayIntent())
+                    return
+                }
                 begin()
             }
             Step.DONE -> begin()
@@ -156,7 +189,7 @@ class SetupActivity : AppCompatActivity() {
         }.start()
     }
 
-    private enum class Step { MIC, CAMERA, NOTIFICATIONS, ROLE, BATTERY, DONE }
+    private enum class Step { MIC, CAMERA, NOTIFICATIONS, ROLE, BATTERY, OVERLAY, DONE }
 
     private var step = Step.DONE
 
