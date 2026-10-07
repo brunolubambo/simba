@@ -14,6 +14,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.File
 import java.net.URLEncoder
+import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
@@ -26,6 +27,17 @@ class Speaker(context: Context) : TextToSpeech.OnInitListener {
     private var ready = false
     private var player: MediaPlayer? = null
 
+    /** Voz do edge-tts para as frases do modo conversa; null = voz padrão do servidor. */
+    var voice: String? = null
+
+    // Fila do modo conversa (só na thread principal).
+    private class Clip(val text: String, val file: File?, val lang: String)
+    private val queue = PhraseQueue<Clip>()
+    private var queuePlaying = false
+    private var queueSpoken = 0
+    private var generation = 0
+    private val idle = mutableListOf<() -> Unit>()
+
     override fun onInit(status: Int) {
         ready = status == TextToSpeech.SUCCESS
         if (ready) tts.language = Locale("pt", "BR")
@@ -37,13 +49,100 @@ class Speaker(context: Context) : TextToSpeech.OnInitListener {
             done()
             return
         }
+        clearQueue()
         VozLog.i("fala: chars=${clean.length}")
         thread(name = "simba-tts") {
-            val file = fetch(clean)
+            val file = fetch(clean, null, File(app.cacheDir, "simba-say.mp3"))
             main.post {
                 if (file != null) play(file, clean, done) else local(clean, done)
             }
         }
+    }
+
+    /** Fala fixa (ex.: "Pois não, senhor?") guardada em disco: toca na hora, sem rede, depois da primeira vez. */
+    fun sayCached(text: String, done: () -> Unit) {
+        val cached = cachedFile(text)
+        if (cached.length() > 0) {
+            clearQueue()
+            VozLog.i("fala em cache: chars=${text.length}")
+            play(cached, text, done)
+            return
+        }
+        clearQueue()
+        VozLog.i("fala sem cache ainda: chars=${text.length}")
+        thread(name = "simba-tts") {
+            val file = store(text, cached)
+            main.post { if (file != null) play(file, text, done) else local(text, done) }
+        }
+    }
+
+    /** Gera o áudio da fala fixa em segundo plano, se ainda não estiver no disco. */
+    fun preload(text: String) {
+        val cached = cachedFile(text)
+        if (cached.length() > 0) return
+        thread(name = "simba-tts-cache") { store(text, cached) }
+    }
+
+    /** Modo conversa: entra na fila; o áudio é buscado já, e toca em ordem, uma frase por vez. */
+    fun enqueue(text: String, voz: String?, lang: String) {
+        val clean = Wake.spoken(text)
+        if (clean.isBlank()) return
+        val id = queue.add()
+        val gen = generation
+        val target = File(app.cacheDir, "frase-$gen-$id.mp3")
+        thread(name = "simba-frase") {
+            val file = fetch(clean, voz ?: voice, target)
+            main.post {
+                if (gen != generation || !queue.ready(id, Clip(clean, file, lang))) {
+                    file?.delete()
+                    return@post
+                }
+                pump()
+            }
+        }
+    }
+
+    /** Roda quando a fila esvaziar (ou já, se estiver vazia). */
+    fun afterQueue(block: () -> Unit) {
+        if (!queuePlaying && queue.isEmpty()) block() else idle += block
+    }
+
+    /** Para a fila e descarta frases e callbacks pendentes. */
+    fun clearQueue() {
+        generation++
+        queue.clear()
+        idle.clear()
+        if (queuePlaying) stop()
+        queuePlaying = false
+        queueSpoken = 0
+    }
+
+    private fun pump() {
+        if (queuePlaying) return
+        val clip = queue.pollReady()
+        if (clip == null) {
+            if (queue.isEmpty()) drained()
+            return
+        }
+        queuePlaying = true
+        queueSpoken++
+        VozLog.i(if (queueSpoken == 1) "primeira frase falada (start) chars=${clip.text.length}" else "frase $queueSpoken falada (start) chars=${clip.text.length}")
+        val gen = generation
+        val next = {
+            clip.file?.delete()
+            if (gen == generation) {
+                queuePlaying = false
+                pump()
+            }
+        }
+        if (clip.file != null) play(clip.file, clip.text, next, clip.lang) else local(clip.text, next, clip.lang)
+    }
+
+    private fun drained() {
+        queueSpoken = 0
+        val waiting = idle.toList()
+        idle.clear()
+        waiting.forEach { it() }
     }
 
     fun stop() {
@@ -53,17 +152,33 @@ class Speaker(context: Context) : TextToSpeech.OnInitListener {
     }
 
     fun shutdown() {
+        clearQueue()
         stop()
         tts.shutdown()
     }
 
-    private fun fetch(text: String): File? {
+    /** Chave = texto + voz. As falas fixas usam a voz padrão do servidor. */
+    private fun cachedFile(text: String, voz: String = DEFAULT_VOICE_KEY): File {
+        val key = MessageDigest.getInstance("SHA-256").digest("$text|$voz".toByteArray())
+            .joinToString("") { "%02x".format(it) }.take(24)
+        return File(app.cacheDir, "fala-$key.mp3")
+    }
+
+    private fun store(text: String, cached: File): File? {
+        val tmp = File(app.cacheDir, cached.name + ".tmp")
+        val file = fetch(text, null, tmp) ?: return null
+        return if (file.renameTo(cached)) cached else file
+    }
+
+    private fun fetch(text: String, voz: String?, target: File): File? {
         val base = Prefs.url(app)
         val token = Prefs.token(app)
         if (base.isBlank() || token.isBlank()) return null
         return try {
             val coded = URLEncoder.encode(token, "UTF-8")
-            val body = JSONObject().put("text", text).toString().toRequestBody("application/json".toMediaType())
+            val json = JSONObject().put("text", text)
+            if (voz != null) json.put("voz", voz)
+            val body = json.toString().toRequestBody("application/json".toMediaType())
             VozLog.i("POST /tts início")
             val created = http.newCall(Request.Builder().url("$base/tts?token=$coded").post(body).build()).execute()
             VozLog.i("POST /tts cabeçalho recebido código=${created.code}")
@@ -75,11 +190,10 @@ class Speaker(context: Context) : TextToSpeech.OnInitListener {
                 VozLog.i("GET /tts/{id} cabeçalho recebido código=${audio.code}")
                 audio.use { clip ->
                     if (!clip.isSuccessful) return null
-                    val file = File(app.cacheDir, "simba-say.mp3")
                     val bytes = clip.body?.bytes() ?: return null
                     VozLog.i("GET /tts/{id} último byte recebido bytes=${bytes.size}")
-                    file.writeBytes(bytes)
-                    file
+                    target.writeBytes(bytes)
+                    target
                 }
             }
         } catch (_: Exception) {
@@ -87,7 +201,7 @@ class Speaker(context: Context) : TextToSpeech.OnInitListener {
         }
     }
 
-    private fun play(file: File, text: String, done: () -> Unit) {
+    private fun play(file: File, text: String, done: () -> Unit, lang: String? = null) {
         stop()
         val once = java.util.concurrent.atomic.AtomicBoolean(false)
         val finish = Runnable { if (once.compareAndSet(false, true)) done() }
@@ -108,7 +222,7 @@ class Speaker(context: Context) : TextToSpeech.OnInitListener {
         media.setOnErrorListener { mp, _, _ ->
             mp.release()
             if (player === mp) player = null
-            if (!started && once.compareAndSet(false, true)) local(text, done) else finish.run()
+            if (!started && once.compareAndSet(false, true)) local(text, done, lang) else finish.run()
             true
         }
         try {
@@ -122,15 +236,17 @@ class Speaker(context: Context) : TextToSpeech.OnInitListener {
         } catch (_: Exception) {
             if (player === media) player = null
             runCatching { media.release() }
-            if (once.compareAndSet(false, true)) local(text, done)
+            if (once.compareAndSet(false, true)) local(text, done, lang)
         }
     }
 
-    private fun local(text: String, done: () -> Unit) {
+    private fun local(text: String, done: () -> Unit, lang: String? = null) {
         if (!ready) {
             done()
             return
         }
+        VozLog.i("voz local de reserva chars=${text.length}")
+        tts.language = if (lang.isNullOrBlank()) Locale("pt", "BR") else Locale.forLanguageTag(lang)
         tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {}
             override fun onDone(utteranceId: String?) { main.post(done) }
@@ -138,5 +254,9 @@ class Speaker(context: Context) : TextToSpeech.OnInitListener {
             override fun onError(utteranceId: String?) { main.post(done) }
         })
         tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "simba")
+    }
+
+    private companion object {
+        const val DEFAULT_VOICE_KEY = "padrao"
     }
 }

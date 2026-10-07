@@ -20,6 +20,11 @@ class SimbaLink(
     private val onError: (String) -> Unit,
     private val onApproval: (String, String) -> Unit,
     private val onNotice: (String) -> Unit,
+    private val onFrase: (text: String, idioma: String?, voz: String?) -> Unit = { _, _, _ -> },
+    private val onModo: (ConversaModo) -> Unit = {},
+    private val onTurnDone: (encaminhado: Boolean) -> Unit = {},
+    private val onReset: () -> Unit = {},
+    private val conversa: Boolean = false,
 ) {
     private val app = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
@@ -37,6 +42,7 @@ class SimbaLink(
     private var retried = false
     @Volatile private var gotReply = false
     @Volatile private var firstTextLogged = false
+    @Volatile private var firstFraseLogged = false
 
     // Reconexão automática; só some quando o serviço manda fechar de propósito.
     private var closedByUs = false
@@ -88,7 +94,30 @@ class SimbaLink(
                     }
                     ui { onText(event.optString("text")) }
                 }
-                "done" -> if (waiting) {
+                "frase" -> {
+                    gotReply = true
+                    if (!firstFraseLogged) {
+                        firstFraseLogged = true
+                        VozLog.i("primeira frase recebida chars=${event.optString("text").length}")
+                    }
+                    val idioma = event.optString("idioma").ifBlank { null }
+                    val voz = event.optString("voz").ifBlank { null }
+                    ui { onFrase(event.optString("text"), idioma, voz) }
+                }
+                "modo" -> {
+                    val modo = ConversaModo.from(
+                        event.optBoolean("ativo"), event.optString("stt"), event.optString("voz"), event.optString("idioma"),
+                    )
+                    VozLog.i(if (modo.ativo) "modo conversa: evento de início stt=${modo.stt}" else "modo conversa: evento de fim")
+                    ui { onModo(modo) }
+                }
+                "done" -> if (event.optBoolean("conversa")) {
+                    waiting = false
+                    firstFraseLogged = false
+                    VozLog.i("done do turno de conversa")
+                    val encaminhado = event.optBoolean("encaminhado")
+                    ui { onTurnDone(encaminhado) }
+                } else if (waiting) {
                     waiting = false
                     VozLog.i("done recebido")
                     ui { onDone() }
@@ -126,6 +155,8 @@ class SimbaLink(
             if (socket !== webSocket) return
             socket = null
             if (closedByUs) return
+            // A sessão do modo conversa fica presa à conexão: caiu, acabou.
+            ui { onReset() }
             if (waiting) {
                 if (!retried && !gotReply && question != null) {
                     retried = true
@@ -166,6 +197,7 @@ class SimbaLink(
             retried = false
             gotReply = false
             firstTextLogged = false
+            firstFraseLogged = false
             current = socket
             if (current == null) pending = text
         }
@@ -197,6 +229,17 @@ class SimbaLink(
         return ok
     }
 
+    /** Espera uma resposta que o servidor manda sozinho (pedido reencaminhado ao sair do modo conversa). */
+    fun expect() {
+        synchronized(lock) {
+            waiting = true
+            question = null
+            retried = true
+            gotReply = false
+            firstTextLogged = false
+        }
+    }
+
     fun approve(id: String, ok: Boolean) {
         synchronized(lock) { socket }?.send(JSONObject().put("type", "approve").put("id", id).put("ok", ok).toString())
     }
@@ -225,7 +268,8 @@ class SimbaLink(
             else -> "wss://$base"
         }
         val coded = URLEncoder.encode(token, "UTF-8")
-        return "$root/ws?token=$coded&device=celular"
+        val extra = if (conversa) "&recursos=conversa" else ""
+        return "$root/ws?token=$coded&device=celular$extra"
     }
 
     companion object {

@@ -14,6 +14,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.speech.RecognitionListener
 import android.speech.SpeechRecognizer
 import androidx.core.app.NotificationCompat
@@ -32,8 +33,11 @@ class HotwordService : Service() {
     private val reply = StringBuilder()
     private var notice: String? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var modo = ConversaModo.NORMAL
+    private var turnStart = 0L
 
     private val restart = Runnable { listen() }
+    private val rearm = Runnable { if (modo.ativo && phase == Phase.COMMAND) arm() }
 
     private val listener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) { VozLog.start("reconhecedor pronto (onReadyForSpeech) fase=$phase") }
@@ -44,6 +48,12 @@ class HotwordService : Service() {
         override fun onEvent(eventType: Int, params: Bundle?) {}
         override fun onError(error: Int) {
             if (active < 0) return
+            if (modo.ativo && phase == Phase.COMMAND) {
+                // Silêncio ou nada entendido no modo conversa: continua ouvindo, sem sair do modo.
+                main.removeCallbacks(rearm)
+                main.postDelayed(rearm, REARM_MS)
+                return
+            }
             if (phase == Phase.COMMAND || phase == Phase.YESNO) idle() else scheduleRestart()
         }
         override fun onResults(results: Bundle?) {
@@ -65,11 +75,17 @@ class HotwordService : Service() {
             this,
             onText = { reply.append(it).append("\n\n") },
             onDone = {
-                if (approvalId == null && phase != Phase.YESNO) finishReply()
+                // No modo conversa a resposta do agente (a que ligou o modo) não é falada: o tutor abre a conversa.
+                if (!modo.ativo && approvalId == null && phase != Phase.YESNO) finishReply()
             },
             onError = { speaker.say(it.ifBlank { "Não consegui concluir." }, ::idle) },
             onApproval = { id, prompt -> askApproval(id, prompt) },
             onNotice = { text -> notice(text) },
+            onFrase = { text, idioma, voz -> onFrase(text, idioma, voz) },
+            onModo = { onModo(it) },
+            onTurnDone = { onTurnDone(it) },
+            onReset = { onReset() },
+            conversa = true,
         )
         channel()
         val power = getSystemService(PowerManager::class.java)
@@ -101,6 +117,7 @@ class HotwordService : Service() {
         }
         wakeLock?.acquire(4 * 60 * 60 * 1000L)
         link.connect()
+        speaker.preload(GREETING)
         Phone.start(this)
         if (phase == Phase.HOTWORD) listen()
         return START_STICKY
@@ -108,6 +125,7 @@ class HotwordService : Service() {
 
     override fun onDestroy() {
         main.removeCallbacks(restart)
+        main.removeCallbacks(rearm)
         dropRecognizer()
         Phone.stop()
         link.close()
@@ -147,11 +165,15 @@ class HotwordService : Service() {
             link.ask(rest)
         } else {
             phase = Phase.COMMAND
-            speaker.say("Pois não, senhor?") { arm() }
+            speaker.sayCached(GREETING) { arm() }
         }
     }
 
     private fun onCommand(text: String) {
+        if (modo.ativo) {
+            turnStart = SystemClock.elapsedRealtime()
+            VozLog.i("modo conversa: fala do usuário enviada chars=${text.length}")
+        }
         phase = Phase.BUSY
         hush()
         reply.clear()
@@ -188,7 +210,69 @@ class HotwordService : Service() {
         approvalId = null
         val said = reply.toString().trim()
         reply.clear()
-        if (said.isBlank()) idle() else speaker.say(said, ::afterSpeech)
+        if (said.isBlank()) idle() else speaker.afterQueue { speaker.say(said, ::afterSpeech) }
+    }
+
+    private fun onFrase(text: String, idioma: String?, voz: String?) {
+        if (phase == Phase.COMMAND) {
+            phase = Phase.BUSY
+            hush()
+        }
+        speaker.enqueue(text, ConversaModo.vozDaFrase(voz, modo), ConversaModo.idiomaDaFrase(idioma, modo))
+    }
+
+    private fun onModo(next: ConversaModo) {
+        if (next.ativo) {
+            modo = next
+            speaker.voice = next.voz
+            reply.clear()
+            VozLog.i("modo conversa início stt=${next.stt}")
+        } else {
+            if (!modo.ativo) return
+            modo = ConversaModo.NORMAL
+            main.removeCallbacks(rearm)
+            speaker.clearQueue()
+            speaker.voice = null
+            VozLog.i("modo conversa fim")
+        }
+        refreshNotification()
+    }
+
+    /** Fim de um turno do modo conversa (ou do feedback final): espera a fila tocar e reabre o microfone. */
+    private fun onTurnDone(encaminhado: Boolean) {
+        if (encaminhado) {
+            phase = Phase.BUSY
+            reply.clear()
+            link.expect()
+        }
+        speaker.afterQueue {
+            if (turnStart > 0) VozLog.i("modo conversa: turno total ${SystemClock.elapsedRealtime() - turnStart}ms")
+            turnStart = 0
+            when {
+                modo.ativo -> listenConversa()
+                encaminhado -> {}
+                else -> idle()
+            }
+        }
+    }
+
+    private fun onReset() {
+        if (!modo.ativo) return
+        onModo(ConversaModo.NORMAL)
+        hush()
+        idle()
+    }
+
+    /** Modo conversa: microfone direto em modo comando, sem precisar de "ei, Simba". */
+    private fun listenConversa() {
+        main.removeCallbacks(restart)
+        woke = false
+        approvalId = null
+        phase = Phase.COMMAND
+        if (recognizer == null) {
+            recognizer = Speech.recognizer(this)?.also { it.setRecognitionListener(listener) } ?: return
+        }
+        arm()
     }
 
     private fun afterSpeech() {
@@ -208,6 +292,10 @@ class HotwordService : Service() {
     }
 
     private fun idle() {
+        if (modo.ativo) {
+            listenConversa()
+            return
+        }
         woke = false
         approvalId = null
         phase = Phase.HOTWORD
@@ -223,9 +311,9 @@ class HotwordService : Service() {
         val ear = recognizer ?: return
         active = ++session
         try {
-            ear.startListening(Speech.intent())
+            ear.startListening(if (modo.ativo) Speech.conversaIntent(modo.stt) else Speech.intent())
         } catch (_: Exception) {
-            scheduleRestart()
+            if (modo.ativo) main.postDelayed(rearm, REARM_MS) else scheduleRestart()
         }
     }
 
@@ -271,16 +359,21 @@ class HotwordService : Service() {
         manager.createNotificationChannel(channel)
     }
 
+    private fun refreshNotification() {
+        getSystemService(NotificationManager::class.java).notify(NOTE_ID, notification())
+    }
+
     private fun notification(): Notification {
         val stop = PendingIntent.getService(
             this, 1,
             Intent(this, HotwordService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_IMMUTABLE
         )
+        val text = if (modo.ativo) getString(R.string.notification_conversa, modo.idioma) else getString(R.string.notification_text)
         return NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle(getString(R.string.notification_title))
-            .setContentText(getString(R.string.notification_text))
+            .setContentText(text)
             .setOngoing(true)
             .addAction(0, getString(R.string.notification_stop), stop)
             .build()
@@ -297,6 +390,8 @@ class HotwordService : Service() {
         private const val ACTION_PAUSE = "app.simba.assistant.PAUSE"
         private const val ACTION_RESUME = "app.simba.assistant.RESUME"
         private const val ACTION_STOP = "app.simba.assistant.STOP"
+        private const val GREETING = "Pois não, senhor?"
+        private const val REARM_MS = 300L
 
         fun start(context: Context) {
             ContextCompat.startForegroundService(context, Intent(context, HotwordService::class.java))
