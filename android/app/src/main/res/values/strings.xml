@@ -16,5 +16,8 @@
     <string name="channel_name">Escuta do SIMBA</string>
     <string name="session_listening">Ouvindo</string>
     <string name="no_server">Configure o servidor antes de ativar.</string>
+    <string name="overlay_granted">Alarme direto no Relógio: permitido (Aparecer sobre outros apps).</string>
+    <string name="overlay_missing">Alarme direto no Relógio: falta permitir “Aparecer sobre outros apps”. Sem isso o SIMBA deixa uma notificação para você tocar.</string>
+    <string name="overlay_grant">Permitir “Aparecer sobre outros apps”</string>
     <string name="no_mic">O celular não tem reconhecimento de voz.</string>
 </resources>

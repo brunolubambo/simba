@@ -4,6 +4,7 @@ import android.app.AlarmManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -11,8 +12,14 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.SystemClock
+import android.provider.AlarmClock
+import android.util.Log
 import androidx.core.app.NotificationCompat
-import java.util.Calendar
+import java.time.Instant
+import java.time.ZoneId
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
@@ -24,6 +31,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /** Busca comandos no servidor e executa no aparelho. */
 object Phone {
+    private const val TAG = "SimbaAlarme"
+    private const val ESPERA_OVERLAY_MS = 300L  // a sobreposição precisa estar na tela antes do startActivity
+    private const val ESPERA_RELOGIO_MS = 3_000L // quanto esperar o Relógio aparecer em getNextAlarmClock()
+    private const val PASSO_MS = 250L
+    private val ISO = DateTimeFormatter.ISO_OFFSET_DATE_TIME
     private val http = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
@@ -144,46 +156,83 @@ object Phone {
         val hour = parts.getOrNull(0)?.toIntOrNull() ?: -1
         val minute = parts.getOrNull(1)?.toIntOrNull() ?: -1
         if (hour !in 0..23 || minute !in 0..59) {
+            Log.w(TAG, "recebido id=$id hora='$hora' invalida")
             report(context, id, false, "hora invalida")
             return
         }
-        val quando = Calendar.getInstance().apply {
-            set(Calendar.HOUR_OF_DAY, hour)
-            set(Calendar.MINUTE, minute)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-            if (timeInMillis <= System.currentTimeMillis() + 15_000L) add(Calendar.DAY_OF_YEAR, 1)
-        }
-        val fire = Intent(context, AlarmReceiver::class.java)
-            .putExtra(AlarmRingActivity.EXTRA_HORA, hora)
-            .putExtra(AlarmRingActivity.EXTRA_ETIQUETA, etiqueta)
-        val firePi = PendingIntent.getBroadcast(
-            context,
-            hour * 60 + minute,
-            fire,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        val agora = ZonedDateTime.now()
+        val alvo = AlarmTime.calcular(hour, minute, agora)
+        val am = context.getSystemService(AlarmManager::class.java)
+        val antes = am.nextAlarmClock?.triggerTime
+        Log.i(
+            TAG,
+            "recebido id=$id hora=$hora etiqueta='$etiqueta' fuso=${agora.zone.id} agora=${agora.format(ISO)} " +
+                "alvo=${alvo.iso()} (${alvo.descricao()}) amanha=${alvo.amanha} proximoAntes=${iso(antes)}"
         )
-        val show = PendingIntent.getActivity(
-            context,
-            hour * 60 + minute + 9000,
-            Intent(context, AlarmRingActivity::class.java)
-                .putExtra(AlarmRingActivity.EXTRA_HORA, hora)
-                .putExtra(AlarmRingActivity.EXTRA_ETIQUETA, etiqueta),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        try {
-            val am = context.getSystemService(AlarmManager::class.java)
-            if (Build.VERSION.SDK_INT >= 31 && !am.canScheduleExactAlarms()) {
-                report(context, id, false, "o Android bloqueou alarme exacto; em Ajustes do SIMBA permita alarmes")
-            } else {
-                am.setAlarmClock(AlarmManager.AlarmClockInfo(quando.timeInMillis, show), firePi)
-                report(context, id, true, "")
-            }
-        } catch (_: SecurityException) {
-            report(context, id, false, "o Android bloqueou o alarme")
-        } catch (_: Exception) {
-            report(context, id, false, "nao criou o alarme")
+        // Abrir o Relógio em segundo plano só é permitido com uma sobreposição visível (Android 15+).
+        val overlay = AlarmOverlay(context)
+        val comOverlay = overlay.mostrar()
+        main.postDelayed({
+            val erroAbrir = abrirRelogio(context, hour, minute, etiqueta)
+            overlay.remover()
+            aguardarRelogio(
+                context, am, alvo, antes, id, hora, etiqueta, erroAbrir, comOverlay,
+                SystemClock.elapsedRealtime()
+            )
+        }, if (comOverlay) ESPERA_OVERLAY_MS else 0L)
+    }
+
+    /** Pede o alarme ao Relógio sem tela. Devolve null se o pedido saiu, ou o motivo da falha. */
+    private fun abrirRelogio(context: Context, hour: Int, minute: Int, etiqueta: String): String? {
+        val clock = Intent(AlarmClock.ACTION_SET_ALARM)
+            .putExtra(AlarmClock.EXTRA_HOUR, hour)
+            .putExtra(AlarmClock.EXTRA_MINUTES, minute)
+            .putExtra(AlarmClock.EXTRA_MESSAGE, etiqueta.ifBlank { "SIMBA" })
+            .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return try {
+            context.startActivity(clock)
+            Log.i(TAG, "relogio: ACTION_SET_ALARM enviado")
+            null
+        } catch (e: ActivityNotFoundException) {
+            Log.w(TAG, "relogio: nenhum app atende ACTION_SET_ALARM")
+            "nenhum app de relógio atendeu"
+        } catch (e: SecurityException) {
+            Log.w(TAG, "relogio: bloqueado (SecurityException)")
+            "o Android bloqueou"
+        } catch (e: Exception) {
+            Log.w(TAG, "relogio: falhou (${e.javaClass.simpleName})")
+            "falhou ao abrir"
         }
+    }
+
+    /** Espera até ~3 s o Relógio aparecer em getNextAlarmClock(); só então decide o que reportar. */
+    private fun aguardarRelogio(
+        context: Context, am: AlarmManager, alvo: AlarmTime.Alvo, antes: Long?, id: String, hora: String,
+        etiqueta: String, erroAbrir: String?, comOverlay: Boolean, inicio: Long
+    ) {
+        val depois = am.nextAlarmClock?.triggerTime
+        val veredito = AlarmTime.avaliar(antes, depois, alvo.millis)
+        val esgotou = SystemClock.elapsedRealtime() - inicio >= ESPERA_RELOGIO_MS
+        val decidido = erroAbrir != null || esgotou || veredito != AlarmTime.Veredito.NAO_CONFIRMADO
+        if (!decidido) {
+            main.postDelayed({
+                aguardarRelogio(context, am, alvo, antes, id, hora, etiqueta, erroAbrir, comOverlay, inicio)
+            }, PASSO_MS)
+            return
+        }
+        val resultado = if (erroAbrir != null) AlarmTime.Veredito.NAO_CONFIRMADO else veredito
+        Log.i(
+            TAG,
+            "relogio: id=$id veredito=$resultado esperado=${iso(alvo.millis)} proximoDepois=${iso(depois)} " +
+                "esperouMs=${SystemClock.elapsedRealtime() - inicio} sobreposicao=$comOverlay erroAbrir=${erroAbrir ?: "nenhum"}"
+        )
+        if (resultado == AlarmTime.Veredito.CONFIRMADO) {
+            report(context, id, true, "Relógio confirmou: alarme ${alvo.descricao()}")
+            return
+        }
+        // Sem prova do Relógio: comportamento antigo (alarme do SIMBA + notificação para tocar) e verdade ao servidor.
+        val erroProprio = agendarProprio(context, am, alvo, hora, etiqueta)
         val launch = Intent(context, AlarmActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             .putExtra(AlarmActivity.EXTRA_CMD, id)
@@ -191,16 +240,69 @@ object Phone {
             .putExtra(AlarmActivity.EXTRA_ETIQUETA, etiqueta)
         try {
             context.startActivity(launch)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.i(TAG, "fallback: AlarmActivity nao abriu em segundo plano (${e.javaClass.simpleName})")
         }
         avisou(context, launch, hora, etiqueta)
+        val motivo = when {
+            resultado == AlarmTime.Veredito.JA_EXISTIA ->
+                "já havia um alarme neste horário e não consegui provar que o Relógio criou outro"
+            erroAbrir != null -> "não consegui abrir o Relógio ($erroAbrir)"
+            else -> "o Relógio não confirmou"
+        }
+        val detalhe = "$motivo (${alvo.descricao()}); deixei uma notificação para tocar" +
+            (if (erroProprio != null) "; o alarme do SIMBA também falhou: $erroProprio" else "")
+        report(context, id, false, detalhe)
     }
+
+    /** Alarme do próprio SIMBA (AlarmManager). Devolve null se agendou, ou o motivo da falha. */
+    private fun agendarProprio(
+        context: Context, am: AlarmManager, alvo: AlarmTime.Alvo, hora: String, etiqueta: String
+    ): String? {
+        // Um id por horário absoluto: horários diferentes não se sobrescrevem.
+        val codigo = alvo.codigo
+        val fire = Intent(context, AlarmReceiver::class.java)
+            .putExtra(AlarmRingActivity.EXTRA_HORA, hora)
+            .putExtra(AlarmRingActivity.EXTRA_ETIQUETA, etiqueta)
+        val firePi = PendingIntent.getBroadcast(
+            context, codigo, fire, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val show = PendingIntent.getActivity(
+            context,
+            codigo,
+            Intent(context, AlarmRingActivity::class.java)
+                .putExtra(AlarmRingActivity.EXTRA_HORA, hora)
+                .putExtra(AlarmRingActivity.EXTRA_ETIQUETA, etiqueta),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        return try {
+            if (Build.VERSION.SDK_INT >= 31 && !am.canScheduleExactAlarms()) {
+                Log.w(TAG, "fallback: alarme exato bloqueado")
+                "o Android bloqueou alarme exato"
+            } else {
+                am.setAlarmClock(AlarmManager.AlarmClockInfo(alvo.millis, show), firePi)
+                Log.i(TAG, "fallback: setAlarmClock agendado codigo=$codigo alvo=${alvo.iso()} proximo=${iso(am.nextAlarmClock?.triggerTime)}")
+                null
+            }
+        } catch (e: SecurityException) {
+            Log.w(TAG, "fallback: setAlarmClock bloqueado (SecurityException)")
+            "o Android bloqueou o alarme"
+        } catch (e: Exception) {
+            Log.w(TAG, "fallback: setAlarmClock falhou (${e.javaClass.simpleName})")
+            "não criou o alarme"
+        }
+    }
+
+    private fun iso(millis: Long?): String =
+        if (millis == null) "nenhum"
+        else Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).format(ISO)
 
     private fun avisou(context: Context, target: Intent, hora: String, etiqueta: String) {
         val manager = context.getSystemService(NotificationManager::class.java)
         val channel = NotificationChannel("simba-cmd", "Comandos do SIMBA", NotificationManager.IMPORTANCE_HIGH)
         channel.lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
         manager.createNotificationChannel(channel)
+        Log.i(TAG, "fallback: postando notificacao (notificacoesAtivas=${manager.areNotificationsEnabled()})")
         val pi = PendingIntent.getActivity(
             context,
             (hora + etiqueta + target.getStringExtra(AlarmActivity.EXTRA_CMD)).hashCode(),
@@ -212,7 +314,7 @@ object Phone {
             NotificationCompat.Builder(context, "simba-cmd")
                 .setSmallIcon(R.drawable.ic_launcher_foreground)
                 .setContentTitle("SIMBA")
-                .setContentText("Alarme às $hora")
+                .setContentText("Alarme às $hora. Toque para criar no Relógio.")
                 .setContentIntent(pi)
                 .setFullScreenIntent(pi, true)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -286,8 +388,11 @@ object Phone {
                 .post(json)
                 .build()
             try {
-                http.newCall(req).execute().close()
-            } catch (_: Exception) {
+                http.newCall(req).execute().use { r ->
+                    Log.i(TAG, "report id=$id ok=$ok detalhe='$detalhe' http=${r.code}")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "report id=$id ok=$ok nao chegou ao servidor (${e.javaClass.simpleName})")
             }
         }
     }
