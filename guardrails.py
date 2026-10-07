@@ -15,7 +15,8 @@ FREE = {"Read", "Glob", "Grep", "WebSearch", "WebFetch", "TodoWrite", "Task", "A
         "mcp__google__drive_buscar", "mcp__google__drive_ler",
         "mcp__squad__agente_criar", "mcp__squad__agente_listar",
         "mcp__rotinas__rotina_listar", "mcp__rotinas__rotina_criar", "mcp__rotinas__rotina_editar",
-        "mcp__rotinas__rotina_pausar", "mcp__rotinas__rotina_reativar"} | browser.FREE
+        "mcp__rotinas__rotina_pausar", "mcp__rotinas__rotina_reativar",
+        "mcp__conversa__iniciar_modo_conversa"} | browser.FREE
 FREE_PREFIX = ("mcp__vida__",     # dados locais, reversíveis
                "mcp__telegram__",  # mensagens para o chat do próprio Bruno
                "mcp__docs__")      # documentos criados no workspace
