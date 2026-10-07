@@ -36,17 +36,19 @@ class HotwordService : Service() {
     private val restart = Runnable { listen() }
 
     private val listener = object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) {}
-        override fun onBeginningOfSpeech() {}
+        override fun onReadyForSpeech(params: Bundle?) { VozLog.start("reconhecedor pronto (onReadyForSpeech) fase=$phase") }
+        override fun onBeginningOfSpeech() { VozLog.i("início da fala (onBeginningOfSpeech)") }
         override fun onRmsChanged(rmsdB: Float) {}
         override fun onBufferReceived(buffer: ByteArray?) {}
-        override fun onEndOfSpeech() {}
+        override fun onEndOfSpeech() { VozLog.i("fim da fala (onEndOfSpeech)") }
         override fun onEvent(eventType: Int, params: Bundle?) {}
         override fun onError(error: Int) {
             if (active < 0) return
             if (phase == Phase.COMMAND || phase == Phase.YESNO) idle() else scheduleRestart()
         }
         override fun onResults(results: Bundle?) {
+            val chars = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()?.length ?: 0
+            VozLog.i("resultado final do reconhecedor chars=$chars fase=$phase")
             take(results, partial = false)
             if (phase == Phase.HOTWORD && !woke) scheduleRestart()
         }

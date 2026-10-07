@@ -95,15 +95,21 @@ async def run_and_broadcast(text: str, origin: str, canal: str | None = None, vo
         user["canal"] = canal
     if canal == "HUD":
         user["falar"] = False
+    t_ini = time.perf_counter()
     await hub.broadcast(user)
     if voice:
         text = "[por voz: 1 ou 2 frases, sem markdown, pronto para falar]\n" + text
+    texto_enviado = False
     final: list[str] = []                    # texto depois da última ferramenta = a resposta final
     try:
         async for ev in state["simba"].ask(text):
             await hub.broadcast(ev)
             kind = ev.get("type")
             if kind == "text":
+                if not texto_enviado:
+                    texto_enviado = True
+                    print(f"[perf] {time.strftime('%H:%M:%S')} primeiro text enviado "
+                          f"+{time.perf_counter() - t_ini:.2f}s desde o pedido voice={voice}", flush=True)
                 final.append(ev["text"])
             elif kind == "tool" or (kind == "agent" and ev.get("state") == "working"):
                 final = []
@@ -188,7 +194,8 @@ async def ws(socket: WebSocket, token: str = "", device: str = "pc"):
                     await socket.send_json({"type": "ack", "t": data.get("t")})
                 except Exception:
                     pass
-                print(f"[perf] {time.strftime('%H:%M:%S')} ws recebida (ack imediato, modelo ainda não começou)", flush=True)
+                print(f"[perf] {time.strftime('%H:%M:%S')} ws recebida (ack imediato, modelo ainda não começou) "
+                      f"voice={bool(data.get('voice'))}", flush=True)
                 t = asyncio.create_task(run_and_broadcast(data["text"], device, voice=bool(data.get("voice"))))
                 tasks.add(t); t.add_done_callback(tasks.discard)
             elif kind == "approve":
@@ -419,10 +426,20 @@ async def tts_stream(job: str, token: str = Query("")):
 
     async def audio():
         import edge_tts
+        t0 = time.perf_counter()
+        t_first = None
+        total = 0
         for piece in speech_pieces(text):
             async for chunk in edge_tts.Communicate(piece, VOICE, rate=VOICE_RATE, pitch=VOICE_PITCH).stream():
                 if chunk["type"] == "audio":
+                    if t_first is None:
+                        t_first = time.perf_counter() - t0
+                        print(f"[perf] {time.strftime('%H:%M:%S')} tts primeiro chunk +{t_first:.2f}s "
+                              f"chars={len(text)}", flush=True)
+                    total += len(chunk["data"])
                     yield chunk["data"]
+        print(f"[perf] {time.strftime('%H:%M:%S')} tts último chunk +{time.perf_counter() - t0:.2f}s "
+              f"bytes={total}", flush=True)
 
     chunks = audio()
     try:

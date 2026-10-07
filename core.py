@@ -176,6 +176,7 @@ class Simba:
         """Eventos: text | tool | agent (working/idle) | done."""
         t0 = time.perf_counter()
         async with self._lock:
+            print(f"[perf] {time.strftime('%H:%M:%S')} espera pelo _lock +{time.perf_counter() - t0:.2f}s", flush=True)
             if CHANGED["flag"]:
                 await self.reload()
             if MAX_SESSION_TURNS > 0 and self._turns >= MAX_SESSION_TURNS:

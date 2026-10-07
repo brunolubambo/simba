@@ -37,6 +37,7 @@ class Speaker(context: Context) : TextToSpeech.OnInitListener {
             done()
             return
         }
+        VozLog.i("fala: chars=${clean.length}")
         thread(name = "simba-tts") {
             val file = fetch(clean)
             main.post {
@@ -63,16 +64,21 @@ class Speaker(context: Context) : TextToSpeech.OnInitListener {
         return try {
             val coded = URLEncoder.encode(token, "UTF-8")
             val body = JSONObject().put("text", text).toString().toRequestBody("application/json".toMediaType())
+            VozLog.i("POST /tts início")
             val created = http.newCall(Request.Builder().url("$base/tts?token=$coded").post(body).build()).execute()
+            VozLog.i("POST /tts cabeçalho recebido código=${created.code}")
             created.use { response ->
                 if (!response.isSuccessful) return null
                 val id = JSONObject(response.body?.string().orEmpty()).optString("id")
                 if (id.isBlank()) return null
                 val audio = http.newCall(Request.Builder().url("$base/tts/$id?token=$coded").build()).execute()
+                VozLog.i("GET /tts/{id} cabeçalho recebido código=${audio.code}")
                 audio.use { clip ->
                     if (!clip.isSuccessful) return null
                     val file = File(app.cacheDir, "simba-say.mp3")
-                    file.writeBytes(clip.body?.bytes() ?: return null)
+                    val bytes = clip.body?.bytes() ?: return null
+                    VozLog.i("GET /tts/{id} último byte recebido bytes=${bytes.size}")
+                    file.writeBytes(bytes)
                     file
                 }
             }
@@ -107,8 +113,11 @@ class Speaker(context: Context) : TextToSpeech.OnInitListener {
         }
         try {
             media.setDataSource(file.absolutePath)
+            VozLog.i("áudio prepare() início")
             media.prepare()
+            VozLog.i("áudio prepare() fim")
             media.start()
+            VozLog.i("áudio start() chamado chars=${text.length}")
             started = true
         } catch (_: Exception) {
             if (player === media) player = null
