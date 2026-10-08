@@ -13,7 +13,7 @@ from .squad import squad_server, CHANGED
 from .tasks import routines_server
 from .telegram import telegram_server
 from .documentos import docs_server
-from . import browser, celular, pc
+from . import browser, celular, pc, rapido
 from .conversa import conversa_server
 
 Approver = Callable[[str], Awaitable[bool]]
@@ -145,11 +145,17 @@ class Simba:
             return ""
         return f"Pergunta: {user} Resposta: {answer}"[:400]
 
-    def _compose(self, text: str) -> str:
+    def _compose(self, text: str, ponte_rapida: str | None = None) -> str:
+        """`ponte_rapida`: bloco da via rapida ja tirado para este pedido (o reenvio reusa o mesmo, para a
+        sessao nova tambem receber). Sem ele, pega agora o que a via rapida ainda nao entregou."""
         lines = [f"[agora: {now_label()} | contas Google conectadas: {authorized() or 'nenhuma'}]"]
         if self._bridge:
             lines.append(f"[assunto anterior: {self._bridge}]")
             self._bridge = ""
+        if ponte_rapida is None:
+            ponte_rapida = rapido.tomar_para_agente(rapido.DISPOSITIVO)
+        if ponte_rapida:
+            lines.append(ponte_rapida)
         return "\n".join(lines) + "\n" + text
 
     def _remember_cost(self, msg) -> None:
@@ -183,7 +189,8 @@ class Simba:
                 await self.reload()
             if MAX_SESSION_TURNS > 0 and self._turns >= MAX_SESSION_TURNS:
                 await self._reset_session("turnos")
-            query_text = self._compose(text)
+            ponte_rapida = rapido.tomar_para_agente(rapido.DISPOSITIVO)   # entregue uma vez; reenvio reusa
+            query_text = self._compose(text, ponte_rapida)
             load = getattr(self, "_load", {})
             first_text = False
             first_s = None
@@ -277,7 +284,7 @@ class Simba:
                 cost_now = self._session_cost
                 await self._reset_session("custo")
                 if attempt == 1 and not flushed:
-                    query_text = self._compose(text)
+                    query_text = self._compose(text, ponte_rapida)
                     continue
                 if flushed:
                     for ev in drain():
