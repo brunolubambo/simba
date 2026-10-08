@@ -161,17 +161,34 @@ async def conversa_mensagem(socket, sessao, texto: str | None):
 async def via_rapida(socket, device: str, texto: str):
     """Via rapida: o Haiku responde direto, frase por frase, so para este socket (nada de broadcast).
     Se ele pedir o agente, ou falhar, o pedido segue pelo caminho de sempre."""
+    vivo = True
+
     async def enviar(ev):
-        await socket.send_json(ev)
+        nonlocal vivo
+        try:
+            await socket.send_json(ev)
+        except Exception:                      # o app desconectou: nao ha mais para quem falar
+            vivo = False
 
     r = await rapido.responder(texto, enviar, VOICE)
-    if not r.escalou:
+    contexto = ""
+    if r.escalou:
+        if r.frases:                           # o que ja saiu fica; o agente recebe para nao repetir
+            dito = " ".join(r.frases)
+            dito = dito if len(dito) <= rapido.CONTEXTO_MAX else dito[:rapido.CONTEXTO_MAX].rstrip() + "..."
+            contexto = f"[o assistente ja disse: {dito}]"
+        else:
+            await enviar({"type": "frase", "text": rapido.FRASE_ESCALADA, "idioma": "pt-BR", "voz": VOICE})
+        await enviar({"type": "done", "conversa": True, "encaminhado": True})
+    else:
         await enviar({"type": "done", "conversa": True})
-        return
-    await run_and_broadcast(texto, device, voice=True, socket=socket)
+    rapido.perf(r)
+    if r.escalou and vivo:
+        await run_and_broadcast(texto, device, voice=True, socket=socket, contexto=contexto)
 
 
-async def run_and_broadcast(text: str, origin: str, canal: str | None = None, voice: bool = False, socket=None):
+async def run_and_broadcast(text: str, origin: str, canal: str | None = None, voice: bool = False, socket=None,
+                            contexto: str = ""):
     user = {"type": "user", "text": text, "device": origin}
     if canal:
         user["canal"] = canal
@@ -181,6 +198,8 @@ async def run_and_broadcast(text: str, origin: str, canal: str | None = None, vo
     await hub.broadcast(user)
     if voice:
         text = "[por voz: 1 ou 2 frases, sem markdown, pronto para falar]\n" + text
+    if contexto:                              # só para o agente; o evento "user" acima já saiu sem isto
+        text = f"{text}\n{contexto}"
     texto_enviado = False
     sessao_nova = None
     final: list[str] = []                    # texto depois da última ferramenta = a resposta final

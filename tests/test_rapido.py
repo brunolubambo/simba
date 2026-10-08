@@ -314,6 +314,146 @@ class Rota(_Ambiente):
         self.assertNotIn("tools", api.chamadas[1])
         self.assertEqual(self._delta("rapidas"), 0)
 
+    # --- escalada e falhas ---
+
+    def _escalada(self, ws, texto="qual o melhor jeito de estudar para uma prova"):
+        self._perguntar(ws, texto)
+        eventos = [e for e in _ate(ws, _fim_do_agente) if e["type"] != "status"]
+        return eventos, [e["type"] for e in eventos]
+
+    def test_haiku_chama_a_ferramenta_antes_do_texto(self):
+        api = ClienteFalso([_Fluxo([], ferramenta=("escalar_para_agente", {"motivo": "precisa de dado"}))])
+        conversa.definir_cliente(api)
+        pedido = "qual o melhor jeito de estudar para uma prova"
+        with self._ws() as ws:
+            eventos, tipos = self._escalada(ws, pedido)
+        frases = [e for e in eventos if e["type"] == "frase"]
+        self.assertEqual([f["text"] for f in frases], ["Um momento, vou verificar."])
+        self.assertEqual((frases[0]["idioma"], frases[0]["voz"]), ("pt-BR", server.VOICE))
+        dones = [e for e in eventos if e["type"] == "done"]
+        self.assertEqual(dones[0], {"type": "done", "conversa": True, "encaminhado": True})
+        self.assertNotIn("conversa", dones[1])
+        self.assertLess(tipos.index("frase"), tipos.index("done"))
+        self.assertLess(tipos.index("done"), tipos.index("text"))
+        self.assertEqual(len(self.simba.recebidos), 1)
+        self.assertTrue(self.simba.recebidos[0].startswith("[por voz:"))
+        self.assertTrue(self.simba.recebidos[0].endswith(pedido), "sem frase dita, nao ha o que avisar ao agente")
+        self.assertEqual(self._delta("escaladas_haiku"), 1)
+        self.assertEqual(self._delta("falhas"), 0)
+        self.assertEqual(self._delta("rapidas"), 0)
+
+    def test_escalada_depois_de_uma_frase_mantem_a_frase_e_avisa_o_agente(self):
+        api = ClienteFalso([_Fluxo(["Deixe-me ver. Um instante"], ferramenta="escalar_para_agente")])
+        conversa.definir_cliente(api)
+        with self._ws() as ws:
+            eventos, _ = self._escalada(ws)
+        self.assertEqual([e["text"] for e in eventos if e["type"] == "frase"], ["Deixe-me ver.", "Um instante"])
+        self.assertNotIn("Um momento", " ".join(e.get("text", "") for e in eventos))
+        self.assertEqual([e for e in eventos if e["type"] == "done"][0],
+                         {"type": "done", "conversa": True, "encaminhado": True})
+        recebido = self.simba.recebidos[0]
+        self.assertIn("qual o melhor jeito de estudar para uma prova", recebido)
+        self.assertTrue(recebido.endswith("[o assistente ja disse: Deixe-me ver. Um instante]"))
+        user = next(e for e in eventos if e["type"] == "user")
+        self.assertEqual(user["text"], "qual o melhor jeito de estudar para uma prova", "o HUD nao ve a linha de contexto")
+
+    def test_contexto_repassado_e_truncado(self):
+        longa = ("palavra " * 60).strip() + "."
+        api = ClienteFalso([_Fluxo([longa, " resto"], ferramenta="escalar_para_agente")])
+        conversa.definir_cliente(api)
+        with self._ws() as ws:
+            self._escalada(ws)
+        linha = self.simba.recebidos[0].splitlines()[-1]
+        self.assertTrue(linha.startswith("[o assistente ja disse: palavra"))
+        self.assertTrue(linha.endswith("...]"))
+        self.assertLessEqual(len(linha), len("[o assistente ja disse: ") + rapido.CONTEXTO_MAX + len("...]"))
+
+    def test_excecao_da_api_escala_sem_travar(self):
+        conversa.definir_cliente(ClienteFalso([RuntimeError("falha simulada SEGREDO-NA-EXCECAO")]))
+        with self._ws() as ws:
+            eventos, _ = self._escalada(ws)
+        self.assertEqual([e["text"] for e in eventos if e["type"] == "frase"], ["Um momento, vou verificar."])
+        self.assertTrue([e for e in eventos if e["type"] == "done"][0]["encaminhado"])
+        self.assertEqual(len(self.simba.recebidos), 1)
+        self.assertEqual(self._delta("falhas"), 1)
+        log = self.saida.getvalue()
+        self.assertIn("[rapido] falha (RuntimeError)", log)
+        self.assertNotIn("SEGREDO-NA-EXCECAO", log)
+
+    def test_timeout_escala(self):
+        os.environ["RAPIDO_TIMEOUT_S"] = "0.2"
+        conversa.definir_cliente(ClienteFalso([_Fluxo(["lento"], demora=1.0)]))
+        with self._ws() as ws:
+            eventos, _ = self._escalada(ws)
+        self.assertEqual([e["text"] for e in eventos if e["type"] == "frase"], ["Um momento, vou verificar."])
+        self.assertEqual(len(self.simba.recebidos), 1)
+        self.assertEqual(self._delta("falhas"), 1)
+        self.assertIn("[rapido] falha (TimeoutError)", self.saida.getvalue())
+
+    def test_timeout_depois_de_uma_frase_mantem_a_frase(self):
+        os.environ["RAPIDO_TIMEOUT_S"] = "0.45"
+        conversa.definir_cliente(ClienteFalso([_Fluxo(["Primeira frase. Segunda", " lenta"], demora=0.3)]))
+        with self._ws() as ws:
+            eventos, _ = self._escalada(ws)
+        self.assertEqual([e["text"] for e in eventos if e["type"] == "frase"], ["Primeira frase."])
+        self.assertTrue(self.simba.recebidos[0].endswith("[o assistente ja disse: Primeira frase.]"))
+        self.assertEqual(self._delta("falhas"), 1)
+
+    def test_resposta_vazia_escala(self):
+        conversa.definir_cliente(ClienteFalso([[]]))
+        with self._ws() as ws:
+            eventos, _ = self._escalada(ws)
+        self.assertEqual([e["text"] for e in eventos if e["type"] == "frase"], ["Um momento, vou verificar."])
+        self.assertEqual(len(self.simba.recebidos), 1)
+        self.assertEqual(self._delta("falhas"), 1)
+
+    def test_sem_chave_da_api_escala(self):
+        conversa.definir_cliente(None)
+        antes = os.environ.pop("ANTHROPIC_API_KEY", None)
+        try:
+            with self._ws() as ws:
+                eventos, _ = self._escalada(ws)
+        finally:
+            if antes is not None:
+                os.environ["ANTHROPIC_API_KEY"] = antes
+        self.assertEqual([e["text"] for e in eventos if e["type"] == "frase"], ["Um momento, vou verificar."])
+        self.assertEqual(len(self.simba.recebidos), 1)
+        self.assertEqual(self._delta("falhas"), 1)
+
+    def test_app_desconectado_no_meio_nao_chama_o_agente(self):
+        class SocketMorto:
+            async def send_json(self, ev):
+                raise RuntimeError("socket fechado")
+
+        import asyncio
+        for roteiro in ([["Oi."]], [_Fluxo([], ferramenta="escalar_para_agente")], [RuntimeError("x")]):
+            conversa.definir_cliente(ClienteFalso(roteiro))
+            asyncio.run(server.via_rapida(SocketMorto(), "celular", "boa tarde"))
+        self.assertEqual(self.simba.recebidos, [])
+
+    # --- logs ---
+
+    def test_log_por_turno_sem_texto(self):
+        conversa.definir_cliente(ClienteFalso([["Boa tarde, doutor. Em que posso ajudar?"]]))
+        with self._ws() as ws:
+            self._perguntar(ws, "boa tarde, preciso de uma resposta secreta")
+            _ate(ws, _fim_conversa)
+        log = self.saida.getvalue()
+        linhas = [l for l in log.splitlines() if "rapido" in l]
+        self.assertTrue(any(l.startswith("[perf] rapido primeira_frase=") and "escalou=nao frases=2 chars=" in l
+                            for l in linhas), linhas)
+        for texto in ("Boa tarde", "doutor", "posso ajudar", "secreta", "preciso"):
+            self.assertNotIn(texto, log)
+
+    def test_log_da_escalada_informa_o_motivo_sem_texto(self):
+        conversa.definir_cliente(ClienteFalso([_Fluxo(["Deixe-me ver."], ferramenta="escalar_para_agente")]))
+        with self._ws() as ws:
+            self._escalada(ws)
+        log = self.saida.getvalue()
+        self.assertIn("escalou=haiku frases=1 chars=13", log)
+        self.assertNotIn("Deixe-me ver", log)
+        self.assertNotIn("estudar para uma prova", log)
+
     def test_uso_mostra_o_bloco_rapido(self):
         conversa.definir_cliente(ClienteFalso([["Oi."]]))
         with self._ws() as ws:

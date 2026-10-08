@@ -103,6 +103,8 @@ def vai_direto_ao_agente(texto: str) -> bool:
 # ---------- prompt minimo e ferramenta ----------
 
 FERRAMENTA_NOME = "escalar_para_agente"
+FRASE_ESCALADA = "Um momento, vou verificar."   # dita so se nenhuma frase do Haiku ja saiu
+CONTEXTO_MAX = 200                               # caracteres do que o Haiku ja disse, repassados ao agente
 
 FERRAMENTA = {
     "name": FERRAMENTA_NOME,
@@ -192,6 +194,15 @@ async def responder(texto: str, enviar, voz: str, idioma: str = "pt-BR") -> Resu
             RAPIDO_USO["rapidas"] += 1
     res.total = time.perf_counter() - t0
     return res
+
+
+def perf(res: Resultado) -> None:
+    """Uma linha por turno, so com tempos e contagens (nunca o texto)."""
+    def seg(v):
+        return f"{v:.1f}s" if isinstance(v, (int, float)) else "-"
+    chars = sum(len(f) for f in res.frases)
+    print(f"[perf] rapido primeira_frase={seg(res.primeira_frase)} total={seg(res.total)} "
+          f"escalou={res.motivo or 'nao'} frases={len(res.frases)} chars={chars}", flush=True)
 
 
 # ---------- contadores em memoria (padrao de conversa.USO_TOTAL) ----------
