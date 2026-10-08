@@ -158,6 +158,21 @@ async def conversa_mensagem(socket, sessao, texto: str | None):
         await run_and_broadcast(texto, "celular", voice=True, socket=socket)
 
 
+_MARCA_DE_VOZ = re.compile(r"\[por voz:[^\]]*\]\s*")    # o prefixo que run_and_broadcast poe nos pedidos por voz
+
+
+def _resumo_agente() -> str:
+    """O que o agente tratou por ultimo, em uma linha curta, para o Haiku entender referencias ("e isso?").
+    Usa o resumo local do Simba (sem chamar modelo). Nunca levanta excecao: sem resumo, o Haiku segue sem ele."""
+    try:
+        resumo = getattr(state.get("simba"), "_topic_summary", None)
+        bruto = resumo() if callable(resumo) else ""
+    except Exception:
+        return ""
+    limpo = " ".join(_MARCA_DE_VOZ.sub("", bruto if isinstance(bruto, str) else "").split())
+    return limpo[:rapido.CONTEXTO_AGENTE_MAX]
+
+
 async def via_rapida(socket, device: str, texto: str):
     """Via rapida: o Haiku responde direto, frase por frase, so para este socket (nada de broadcast).
     Se ele pedir o agente, ou falhar, o pedido segue pelo caminho de sempre."""
@@ -170,7 +185,7 @@ async def via_rapida(socket, device: str, texto: str):
         except Exception:                      # o app desconectou: nao ha mais para quem falar
             vivo = False
 
-    r = await rapido.responder(texto, enviar, VOICE, device=device)
+    r = await rapido.responder(texto, enviar, VOICE, device=device, contexto_agente=_resumo_agente())
     contexto = ""
     if r.escalou:
         if r.frases:                           # o que ja saiu fica; o agente recebe para nao repetir

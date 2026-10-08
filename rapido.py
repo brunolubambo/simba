@@ -121,13 +121,19 @@ FERRAMENTA = {
 }
 
 
-def prompt_sistema(p: dict | None = None, agora: str | None = None) -> str:
-    """Prompt minimo do Haiku: persona, regras de voz e de escalada. Sem Notas e sem a memoria do agente."""
+def prompt_sistema(p: dict | None = None, agora: str | None = None, contexto_agente: str = "") -> str:
+    """Prompt minimo do Haiku: persona, regras de voz e de escalada. Sem Notas e sem a memoria do agente.
+    `contexto_agente` e o resumo curto do que o agente tratou por ultimo (vazio = sem o bloco)."""
     p = perfil.carregar() if p is None else p
     agora = agora or now_label()
     nome = p.get("nome_tutor") or "Simba"
     usuario = p.get("nome_usuario") or ""
     de = f"assistente pessoal de {usuario}" if usuario else "assistente pessoal do usuario"
+    resumo = _cortar(contexto_agente, CONTEXTO_AGENTE_MAX)
+    extra = (
+        "\n\nO agente completo, que tem as ferramentas, tratou disto ha pouco. Use so para entender o que o "
+        f"usuario quer dizer e nao repita o conteudo.\nContexto recente do agente: {resumo}" if resumo else ""
+    )
     return (
         f"Voce e {nome}, {de}, falando por voz pelo celular. Portugues do Brasil. "
         "Formal, direto, com humor seco; \"senhor\" com moderacao. Discorda com respeito.\n"
@@ -144,6 +150,7 @@ def prompt_sistema(p: dict | None = None, agora: str | None = None) -> str:
         f"da agenda, de e-mail, de memoria ou de fatos pessoais do usuario, para praticar ou treinar um idioma, "
         f"simular uma situacao (entrevista, negociacao, debate), ou se estiver em duvida: chame a "
         f"ferramenta {FERRAMENTA_NOME} ANTES de escrever qualquer texto."
+        f"{extra}"
     )
 
 
@@ -198,6 +205,45 @@ def limpar(device: str) -> None:
     _HISTORICO.pop(device, None)
 
 
+PONTE_MAX = 600                    # caracteres do bloco "conversa rapida recente" que o agente recebe (total)
+CONTEXTO_AGENTE_MAX = 400          # caracteres do resumo do agente que o Haiku recebe
+
+
+def _montar_ponte(trocas: list[dict]) -> str:
+    """"[conversa rapida recente: usuario: ...; assistente: ...]" com no maximo PONTE_MAX caracteres.
+    Se nao couber tudo, ficam as trocas mais novas; uma troca sozinha grande demais e cortada."""
+    prefixo, sufixo = "[conversa rapida recente: ", "]"
+    folga = PONTE_MAX - len(prefixo) - len(sufixo)
+    partes: list[str] = []
+    usado = 0
+    for t in reversed(trocas):
+        parte = f"usuario: {t['pergunta']}; assistente: {t['resposta']}"
+        custo = len(parte) + (2 if partes else 0)
+        if usado + custo > folga:
+            if not partes:
+                partes.append(parte[:max(folga - 3, 0)].rstrip() + "...")
+            break
+        partes.insert(0, parte)
+        usado += custo
+    return prefixo + "; ".join(partes) + sufixo
+
+
+def tomar_para_agente(device: str, agora: float | None = None) -> str:
+    """O bloco com as trocas rapidas que o agente ainda nao viu, para o proximo Simba.ask. Cada troca e entregue
+    uma unica vez (as que nao couberem no limite tambem contam como entregues). Vazio se nao ha nada novo
+    ou se a via rapida esta desligada. As trocas continuam no historico do Haiku."""
+    if not ativo():
+        return ""
+    agora = time.monotonic() if agora is None else agora
+    dados = _vivo(device, agora)
+    novas = [t for t in dados["trocas"] if not t["entregue"]] if dados else []
+    if not novas:
+        return ""
+    for t in novas:
+        t["entregue"] = True
+    return _montar_ponte(novas)
+
+
 def _mensagens(device: str, texto: str) -> list[dict]:
     """Trocas anteriores como turnos reais (user/assistant alternados), e por fim a mensagem atual."""
     mensagens: list[dict] = []
@@ -219,11 +265,13 @@ class Resultado:
     total: float = 0.0
 
 
-async def responder(texto: str, enviar, voz: str, idioma: str = "pt-BR", device: str = DISPOSITIVO) -> Resultado:
+async def responder(texto: str, enviar, voz: str, idioma: str = "pt-BR", device: str = DISPOSITIVO,
+                    contexto_agente: str = "") -> Resultado:
     """Pede a resposta ao Haiku e manda cada frase por `enviar` assim que fecha. Nunca levanta excecao:
     timeout, erro da API, resposta vazia ou falta de chave viram escalou=True, motivo="falha".
     O Haiku recebe as trocas anteriores do dispositivo; a troca de agora so entra no historico se ele a
-    respondeu sozinho (sem escalar) e falou ao menos uma frase."""
+    respondeu sozinho (sem escalar) e falou ao menos uma frase. `contexto_agente` e o resumo curto do que o
+    agente tratou por ultimo, vindo de quem chama (rapido nao enxerga o Simba)."""
     t0 = time.perf_counter()
     res = Resultado()
 
@@ -238,7 +286,7 @@ async def responder(texto: str, enviar, voz: str, idioma: str = "pt-BR", device:
         if conversa._CLIENTE is None and not os.getenv("ANTHROPIC_API_KEY"):
             raise RuntimeError("sem ANTHROPIC_API_KEY")
         fala = await conversa.falar_stream(
-            modelo=modelo(), sistema=prompt_sistema(), mensagens=_mensagens(device, texto),
+            modelo=modelo(), sistema=prompt_sistema(contexto_agente=contexto_agente), mensagens=_mensagens(device, texto),
             max_tokens=max_tokens(), idioma=idioma, voz=voz, enviar=captar, contar=contar,
             timeout=timeout_s(), ferramentas=[FERRAMENTA])
     except Exception as e:
