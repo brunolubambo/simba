@@ -314,7 +314,16 @@ async def lifespan(app):
     await state["simba"].stop()
 
 
-app = FastAPI(title="Simba", lifespan=lifespan)
+def docs_config(env=None) -> dict:
+    """Documentacao automatica (/docs, /redoc, /openapi.json) fica DESLIGADA, a nao ser SIMBA_DOCS=true.
+    Serve so para desenvolver local; em producao nao ligar (ela lista todas as rotas, sem codigo de acesso)."""
+    env = os.environ if env is None else env
+    if str(env.get("SIMBA_DOCS", "")).strip().lower() == "true":
+        return {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"}
+    return {"docs_url": None, "redoc_url": None, "openapi_url": None}
+
+
+app = FastAPI(title="Simba", lifespan=lifespan, **docs_config())
 
 
 @app.websocket("/ws")
