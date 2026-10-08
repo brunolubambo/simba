@@ -104,17 +104,25 @@ class Speaker(context: Context) : TextToSpeech.OnInitListener {
 
     /** Roda quando a fila esvaziar (ou já, se estiver vazia). */
     fun afterQueue(block: () -> Unit) {
-        if (!queuePlaying && queue.isEmpty()) block() else idle += block
+        if (!queuePlaying && queue.isEmpty()) {
+            VozLog.i("afterQueue disparou na hora fila=0 queuePlaying=false generation=$generation")
+            block()
+        } else {
+            VozLog.i("afterQueue na espera fila=${queue.size} queuePlaying=$queuePlaying generation=$generation")
+            idle += block
+        }
     }
 
     /** Para a fila e descarta frases e callbacks pendentes. */
     fun clearQueue() {
+        val apagados = idle.size
         generation++
         queue.clear()
         idle.clear()
         if (queuePlaying) stop()
         queuePlaying = false
         queueSpoken = 0
+        VozLog.i("clearQueue generation=$generation callbacks=$apagados")
     }
 
     private fun pump() {
@@ -142,6 +150,9 @@ class Speaker(context: Context) : TextToSpeech.OnInitListener {
         queueSpoken = 0
         val waiting = idle.toList()
         idle.clear()
+        if (waiting.isNotEmpty()) {
+            VozLog.i("afterQueue disparou ao esvaziar fila=0 queuePlaying=$queuePlaying generation=$generation callbacks=${waiting.size}")
+        }
         waiting.forEach { it() }
     }
 

@@ -201,6 +201,16 @@ async def vozes() -> list[dict]:
     return _VOZES
 
 
+async def precarregar_vozes() -> None:
+    """Na subida do servidor, em segundo plano: a primeira ativação do modo não espera a rede."""
+    try:
+        lista = await vozes()
+    except Exception as e:
+        print(f"[conversa] lista de vozes indisponível na subida ({type(e).__name__})", flush=True)
+        return
+    print(f"[conversa] lista de vozes carregada vozes={len(lista)}", flush=True)
+
+
 def definir_vozes(lista: list[dict] | None) -> None:
     global _VOZES
     _VOZES = lista

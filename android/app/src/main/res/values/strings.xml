@@ -13,6 +13,7 @@
     <string name="notification_title">SIMBA ouvindo</string>
     <string name="notification_text">Diga “ei, Simba”</string>
     <string name="notification_conversa">Modo conversa: %1$s</string>
+    <string name="notification_pensando">Pensando…</string>
     <string name="notification_stop">Parar</string>
     <string name="channel_name">Escuta do SIMBA</string>
     <string name="session_listening">Ouvindo</string>

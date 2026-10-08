@@ -8,6 +8,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -15,6 +17,9 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.speech.RecognitionListener
 import android.speech.SpeechRecognizer
 import androidx.core.app.NotificationCompat
@@ -35,34 +40,95 @@ class HotwordService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var modo = ConversaModo.NORMAL
     private var turnStart = 0L
+    private var erros = ErroConversa.Contagem()
+    private var sairPendente = false
+
+    // Sinal "ouvi": sessão (active) em que a fala começou e em que o sinal já tocou.
+    private var falouEm = -1
+    private var ouviEm = -1
+    private var silencioAte = 0L
+    private var pensando = false
+    private var tom: ToneGenerator? = null
+
+    // Trava contra pedido repetido: último pedido enviado, apagado no fim do turno.
+    private var ultimoPedido: Repetido.Pedido? = null
+    private var repetidoLogado = -1
+
+    // Pedido direto ("ei, Simba, ..."): comando juntado dos parciais da sessão diretoSessao.
+    private var direto: PedidoDireto.Escuta? = null
+    private var diretoSessao = -1
+
+    // Vigia do modo conversa: sessão vigiada e se o reconhecedor chegou a ficar pronto nela.
+    private var vigiaSessao = -1
+    private var prontoEm = -1
 
     private val restart = Runnable { listen() }
-    private val rearm = Runnable { if (modo.ativo && phase == Phase.COMMAND) arm() }
+    private val rearm = Runnable {
+        VozLog.i("rearm fase=$phase stt=${modo.stt}")
+        if (modo.ativo && phase == Phase.COMMAND) arm()
+    }
+    private val armLater = Runnable { if (phase == Phase.COMMAND || phase == Phase.YESNO) arm() }
+    private val estavel = Runnable { conferirDireto() }
+    private val vigia = Runnable { vigiaDisparou() }
 
     private val listener = object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) { VozLog.start("reconhecedor pronto (onReadyForSpeech) fase=$phase") }
-        override fun onBeginningOfSpeech() { VozLog.i("início da fala (onBeginningOfSpeech)") }
+        override fun onReadyForSpeech(params: Bundle?) {
+            VozLog.start("reconhecedor pronto (onReadyForSpeech) fase=$phase")
+            if (active > 0) prontoEm = active
+            vigiar()
+        }
+        override fun onBeginningOfSpeech() {
+            VozLog.i("início da fala (onBeginningOfSpeech)")
+            if (active > 0) falouEm = active
+            vigiar()
+        }
         override fun onRmsChanged(rmsdB: Float) {}
         override fun onBufferReceived(buffer: ByteArray?) {}
-        override fun onEndOfSpeech() { VozLog.i("fim da fala (onEndOfSpeech)") }
+        override fun onEndOfSpeech() {
+            VozLog.i("fim da fala (onEndOfSpeech)")
+            // Sem hush aqui: cancelar o reconhecedor agora descartaria o resultado final.
+            ouvi(active, phase, pedidoDireto = direto != null && diretoSessao == active)
+            vigiar()
+        }
         override fun onEvent(eventType: Int, params: Bundle?) {}
         override fun onError(error: Int) {
+            VozLog.i("onError ${Speech.nomeErro(error)} fase=$phase stt=${modo.stt}")
+            main.removeCallbacks(vigia)
             if (active < 0) return
             if (modo.ativo && phase == Phase.COMMAND) {
-                // Silêncio ou nada entendido no modo conversa: continua ouvindo, sem sair do modo.
-                main.removeCallbacks(rearm)
-                main.postDelayed(rearm, REARM_MS)
+                falhaConversa(error)
+                return
+            }
+            if (phase == Phase.HOTWORD && direto != null && diretoSessao == active) {
+                // O comando já veio nos parciais; o reconhecedor só não fechou o resultado.
+                if (!enviarDireto("sem final", sinal = false)) scheduleRestart()
                 return
             }
             if (phase == Phase.COMMAND || phase == Phase.YESNO) idle() else scheduleRestart()
         }
         override fun onResults(results: Bundle?) {
-            val chars = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()?.length ?: 0
+            main.removeCallbacks(vigia)
+            val texto = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()
+            val chars = texto?.length ?: 0
             VozLog.i("resultado final do reconhecedor chars=$chars fase=$phase")
+            if (chars > 0) erros = ErroConversa.Contagem()
+            if (ErroConversa.rearmarSemTexto(modo.ativo, phase == Phase.COMMAND, active, texto)) {
+                VozLog.i("resultado vazio, rearmando")
+                agendarRearm()
+                return
+            }
+            val sessao = active
+            val fase = phase
             take(results, partial = false)
+            // Sem onEndOfSpeech nesta sessão: o sinal toca agora, depois do hush feito pelo take.
+            if (chars > 0) ouvi(sessao, fase)
             if (phase == Phase.HOTWORD && !woke) scheduleRestart()
         }
         override fun onPartialResults(partialResults: Bundle?) {
+            val chars = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()?.length ?: 0
+            VozLog.i("parcial chars=$chars fase=$phase")
+            if (chars > 0) erros = ErroConversa.Contagem()
+            vigiar()
             take(partialResults, partial = true)
         }
     }
@@ -75,10 +141,16 @@ class HotwordService : Service() {
             this,
             onText = { reply.append(it).append("\n\n") },
             onDone = {
+                limparTrava()
+                pensar(false)
                 // No modo conversa a resposta do agente (a que ligou o modo) não é falada: o tutor abre a conversa.
                 if (!modo.ativo && approvalId == null && phase != Phase.YESNO) finishReply()
             },
-            onError = { speaker.say(it.ifBlank { "Não consegui concluir." }, ::idle) },
+            onError = {
+                limparTrava()
+                pensar(false)
+                speaker.say(it.ifBlank { "Não consegui concluir." }, ::idle)
+            },
             onApproval = { id, prompt -> askApproval(id, prompt) },
             onNotice = { text -> notice(text) },
             onFrase = { text, idioma, voz -> onFrase(text, idioma, voz) },
@@ -126,7 +198,12 @@ class HotwordService : Service() {
     override fun onDestroy() {
         main.removeCallbacks(restart)
         main.removeCallbacks(rearm)
+        main.removeCallbacks(armLater)
+        main.removeCallbacks(estavel)
+        main.removeCallbacks(vigia)
         dropRecognizer()
+        tom?.release()
+        tom = null
         Phone.stop()
         link.close()
         speaker.shutdown()
@@ -138,38 +215,111 @@ class HotwordService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun take(results: Bundle?, partial: Boolean) {
-        if (active < 0) return
+        if (active < 0) {
+            VozLog.i("take descartado motivo=active<0 fase=$phase")
+            return
+        }
         val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim().orEmpty()
-        if (text.isEmpty()) return
+        if (text.isEmpty()) {
+            VozLog.i("take descartado motivo=texto vazio fase=$phase")
+            return
+        }
         when (phase) {
-            Phase.HOTWORD -> {
-                val rest = Wake.rest(text) ?: return
-                if (partial && rest.isBlank()) return
-                onWake(text)
-            }
-            Phase.COMMAND -> if (!partial) onCommand(text)
-            Phase.YESNO -> if (!partial) onYesNo(text)
-            else -> {}
+            Phase.HOTWORD -> if (partial) parcialDireto(text) else finalDireto(text)
+            Phase.COMMAND -> if (partial) descartarParcial() else onCommand(text)
+            Phase.YESNO -> if (partial) descartarParcial() else onYesNo(text)
+            else -> VozLog.i("take descartado motivo=fase fase=$phase")
         }
     }
 
-    private fun onWake(raw: String) {
+    private fun descartarParcial() {
+        VozLog.i("take descartado motivo=parcial fase=$phase")
+    }
+
+    /** Só "ei, Simba": cumprimenta e abre o microfone para o comando. */
+    private fun onWake() {
         if (woke) return
         woke = true
         main.removeCallbacks(restart)
         hush()
-        val rest = Wake.rest(raw).orEmpty()
-        if (rest.isNotBlank()) {
-            phase = Phase.BUSY
-            reply.clear()
-            link.ask(rest)
-        } else {
-            phase = Phase.COMMAND
-            speaker.sayCached(GREETING) { arm() }
+        phase = Phase.COMMAND
+        speaker.sayCached(GREETING) { arm() }
+    }
+
+    /** Parcial no hotword: depois do wake word, junta o comando em vez de enviar o primeiro pedaço. */
+    private fun parcialDireto(text: String) {
+        if (woke) return
+        val rest = Wake.rest(text) ?: return
+        if (rest.isBlank()) return
+        val antes = direto
+        if (antes == null) {
+            diretoSessao = active
+            VozLog.i("wake word no parcial: juntando o comando")
+        }
+        val agora = PedidoDireto.parcial(antes, rest, SystemClock.elapsedRealtime())
+        if (agora === antes) return
+        direto = agora
+        main.removeCallbacks(estavel)
+        main.postDelayed(estavel, PedidoDireto.ESTAVEL_MS)
+    }
+
+    /** Resultado final no hotword: completa o comando juntado, ou cumprimenta se só veio "ei, Simba". */
+    private fun finalDireto(text: String) {
+        if (woke) return
+        val rest = Wake.rest(text)
+        if (!rest.isNullOrBlank()) {
+            if (direto == null) diretoSessao = active
+            direto = PedidoDireto.parcial(direto, rest, SystemClock.elapsedRealtime())
+        } else if (direto == null) {
+            if (rest != null) onWake()
+            return
+        }
+        if (PedidoDireto.decidir(direto, final = true, agora = SystemClock.elapsedRealtime()) == PedidoDireto.Envio.FINAL) {
+            enviarDireto("final")
         }
     }
 
+    private fun conferirDireto() {
+        val escuta = direto ?: return
+        if (woke || phase != Phase.HOTWORD || active < 0 || active != diretoSessao) {
+            esquecerDireto()
+            return
+        }
+        val agora = SystemClock.elapsedRealtime()
+        when (PedidoDireto.decidir(escuta, final = false, agora = agora)) {
+            PedidoDireto.Envio.ESTAVEL -> enviarDireto("estável")
+            else -> main.postDelayed(estavel, PedidoDireto.falta(escuta, agora).coerceAtLeast(1))
+        }
+    }
+
+    /** Envia o comando juntado e só então cancela o reconhecedor. false se não enviou (nada juntado ou repetido). */
+    private fun enviarDireto(motivo: String, sinal: Boolean = true): Boolean {
+        val escuta = direto ?: return false
+        val sessao = active
+        esquecerDireto()
+        if (repetido(escuta.resto)) return false
+        woke = true
+        main.removeCallbacks(restart)
+        phase = Phase.BUSY
+        reply.clear()
+        VozLog.i("pedido direto enviado motivo=$motivo chars=${escuta.resto.length}")
+        enviar(escuta.resto)
+        hush()
+        if (sinal) ouvi(sessao, Phase.HOTWORD, pedidoDireto = true)
+        return true
+    }
+
+    private fun esquecerDireto() {
+        direto = null
+        diretoSessao = -1
+        main.removeCallbacks(estavel)
+    }
+
     private fun onCommand(text: String) {
+        if (repetido(text)) {
+            arm()
+            return
+        }
         if (modo.ativo) {
             turnStart = SystemClock.elapsedRealtime()
             VozLog.i("modo conversa: fala do usuário enviada chars=${text.length}")
@@ -177,8 +327,68 @@ class HotwordService : Service() {
         phase = Phase.BUSY
         hush()
         reply.clear()
+        enviar(text)
+    }
+
+    private fun enviar(text: String) {
+        ultimoPedido = if (modo.ativo) null else Repetido.pedido(text, SystemClock.elapsedRealtime())
         link.ask(text)
     }
+
+    /** O mesmo pedido de novo, com o anterior ainda pendente: não reenvia e continua ouvindo. */
+    private fun repetido(text: String): Boolean {
+        if (!Repetido.ignorar(ultimoPedido, text, SystemClock.elapsedRealtime(), modo.ativo)) return false
+        if (repetidoLogado != active) {
+            repetidoLogado = active
+            VozLog.i("comando repetido ignorado chars=${text.length} fase=$phase")
+        }
+        return true
+    }
+
+    private fun limparTrava() {
+        ultimoPedido = null
+    }
+
+    /**
+     * Sinal de que a fala foi ouvida: uma vez por sessão, só se houve fala, só ao esperar um comando
+     * (fase COMMAND/YESNO, ou o pedido direto depois do wake word).
+     */
+    private fun ouvi(sessao: Int, fase: Phase, pedidoDireto: Boolean = false) {
+        if (!SINAL_OUVI || sessao < 0 || falouEm != sessao || ouviEm == sessao) return
+        if (!pedidoDireto && fase != Phase.COMMAND && fase != Phase.YESNO) return
+        ouviEm = sessao
+        silencioAte = SystemClock.elapsedRealtime() + TOM_MS + POS_TOM_MS
+        VozLog.i("ouvi: sinal som=$SINAL_SOM vibrar=$SINAL_VIBRAR fase=$fase")
+        if (SINAL_SOM) tocarTom()
+        if (SINAL_VIBRAR) vibrar()
+        pensar(true)
+    }
+
+    private fun tocarTom() {
+        // STREAM_NOTIFICATION fica mudo no modo silencioso e no vibrar.
+        val gerador = tom ?: runCatching { ToneGenerator(AudioManager.STREAM_NOTIFICATION, TOM_VOLUME) }
+            .getOrNull()?.also { tom = it } ?: return
+        runCatching { gerador.startTone(ToneGenerator.TONE_PROP_BEEP, TOM_MS.toInt()) }
+    }
+
+    private fun vibrar() {
+        val vibrador: Vibrator = (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            getSystemService(VibratorManager::class.java)?.defaultVibrator
+        } else {
+            getSystemService(Vibrator::class.java)
+        }) ?: return
+        if (!vibrador.hasVibrator()) return
+        runCatching { vibrador.vibrate(VibrationEffect.createOneShot(VIBRAR_MS, VibrationEffect.DEFAULT_AMPLITUDE)) }
+    }
+
+    private fun pensar(ligado: Boolean) {
+        if (pensando == ligado) return
+        pensando = ligado
+        refreshNotification()
+    }
+
+    /** Milissegundos que faltam para o tom do "ouvi" acabar (e não entrar no microfone). */
+    private fun esperaDoTom(): Long = silencioAte - SystemClock.elapsedRealtime()
 
     private fun onYesNo(text: String) {
         val id = approvalId
@@ -226,7 +436,11 @@ class HotwordService : Service() {
             modo = next
             speaker.voice = next.voz
             reply.clear()
+            erros = ErroConversa.Contagem()
+            sairPendente = false
             VozLog.i("modo conversa início stt=${next.stt}")
+            // A instância que ouvia pt-BR não serve para o idioma da prática.
+            dropRecognizer()
         } else {
             if (!modo.ativo) return
             modo = ConversaModo.NORMAL
@@ -234,12 +448,22 @@ class HotwordService : Service() {
             speaker.clearQueue()
             speaker.voice = null
             VozLog.i("modo conversa fim")
+            // E a instância do idioma da prática não volta para o hotword.
+            dropRecognizer()
         }
         refreshNotification()
     }
 
     /** Fim de um turno do modo conversa (ou do feedback final): espera a fila tocar e reabre o microfone. */
     private fun onTurnDone(encaminhado: Boolean) {
+        limparTrava()
+        if (!encaminhado) pensar(false)
+        if (sairPendente && !modo.ativo) {
+            // Confirmação do conversa_sair: o aviso em português já está tocando e volta ao hotword sozinho.
+            sairPendente = false
+            VozLog.i("modo conversa: saída confirmada pelo servidor")
+            return
+        }
         if (encaminhado) {
             phase = Phase.BUSY
             reply.clear()
@@ -269,10 +493,55 @@ class HotwordService : Service() {
         woke = false
         approvalId = null
         phase = Phase.COMMAND
+        pensar(false)
         if (recognizer == null) {
-            recognizer = Speech.recognizer(this)?.also { it.setRecognitionListener(listener) } ?: return
+            recognizer = Speech.recognizer(this, conversa = true)?.also { it.setRecognitionListener(listener) }
+            if (recognizer == null) {
+                VozLog.i("listenConversa reconhecedor novo indisponível")
+                desistirDaConversa("reconhecedor indisponível")
+                return
+            }
+            VozLog.i("listenConversa reconhecedor novo")
+        } else {
+            VozLog.i("listenConversa reconhecedor reutilizado")
         }
         arm()
+    }
+
+    /** Erro do reconhecedor no modo conversa: silêncio rearma; erro que se repete desiste do modo. */
+    private fun falhaConversa(codigo: Int) {
+        val decisao = ErroConversa.decidir(erros, codigo)
+        erros = decisao.contagem
+        if (decisao.parar) desistirDaConversa(Speech.nomeErro(codigo)) else agendarRearm()
+    }
+
+    /** Modo conversa: se o reconhecedor parar de dar notícia, rearma em vez de deixar o microfone parado. */
+    private fun vigiar() {
+        main.removeCallbacks(vigia)
+        if (!modo.ativo || phase != Phase.COMMAND || active < 0) return
+        vigiaSessao = active
+        main.postDelayed(vigia, CONVERSA_VIGIA_MS)
+    }
+
+    private fun vigiaDisparou() {
+        if (!modo.ativo || phase != Phase.COMMAND || active < 0 || active != vigiaSessao) return
+        val pronto = prontoEm == active
+        VozLog.i("reconhecedor sem resposta em ${CONVERSA_VIGIA_MS}ms pronto=$pronto, rearmando")
+        hush()
+        // Nunca ficou pronto: conta como falha do reconhecedor. Ficou pronto e calou: é como o silêncio.
+        if (pronto) agendarRearm() else falhaConversa(SpeechRecognizer.ERROR_CLIENT)
+    }
+
+    /** O reconhecedor não funciona no idioma da prática: avisa em português e volta ao modo normal. */
+    private fun desistirDaConversa(motivo: String) {
+        VozLog.i("modo conversa: desistindo após $motivo seguidos=${erros.seguidos} " +
+            "idioma=${erros.idioma} stt=${modo.stt}")
+        main.removeCallbacks(vigia)
+        erros = ErroConversa.Contagem()
+        sairPendente = link.sairConversa()
+        onModo(ConversaModo.NORMAL)
+        phase = Phase.BUSY
+        speaker.say(FALHA_RECONHECIMENTO, ::idle)
     }
 
     private fun afterSpeech() {
@@ -292,6 +561,7 @@ class HotwordService : Service() {
     }
 
     private fun idle() {
+        limparTrava()
         if (modo.ativo) {
             listenConversa()
             return
@@ -299,30 +569,68 @@ class HotwordService : Service() {
         woke = false
         approvalId = null
         phase = Phase.HOTWORD
+        pensar(false)
         listen()
     }
 
     private fun hush() {
         active = -1
+        main.removeCallbacks(armLater)
+        main.removeCallbacks(vigia)
+        esquecerDireto()
         recognizer?.cancel()
     }
 
     private fun arm() {
-        val ear = recognizer ?: return
+        val ear = recognizer ?: run {
+            // No modo conversa o microfone não pode ficar parado: recria (ou sai do modo, se não houver serviço).
+            if (modo.ativo && phase == Phase.COMMAND) listenConversa()
+            return
+        }
+        val espera = esperaDoTom()
+        if (espera > 0) {
+            VozLog.i("arm adiado ${espera}ms (sinal ouvi)")
+            main.removeCallbacks(armLater)
+            main.postDelayed(armLater, espera)
+            return
+        }
         active = ++session
+        val idioma = if (modo.ativo) modo.stt else ConversaModo.PADRAO_STT
+        VozLog.i("arm idioma=$idioma active=$active")
         try {
             ear.startListening(if (modo.ativo) Speech.conversaIntent(modo.stt) else Speech.intent())
-        } catch (_: Exception) {
-            if (modo.ativo) main.postDelayed(rearm, REARM_MS) else scheduleRestart()
+            vigiar()
+        } catch (e: Exception) {
+            VozLog.i("arm startListening exceção ${e.javaClass.simpleName} idioma=$idioma active=$active")
+            when {
+                // Exceção que se repete conta como erro do cliente: sem isto o rearm não pararia nunca.
+                modo.ativo && phase == Phase.COMMAND -> falhaConversa(SpeechRecognizer.ERROR_CLIENT)
+                modo.ativo -> agendarRearm()
+                else -> scheduleRestart()
+            }
         }
+    }
+
+    private fun agendarRearm() {
+        main.removeCallbacks(rearm)
+        VozLog.i("rearm agendado")
+        main.postDelayed(rearm, REARM_MS)
     }
 
     private fun listen() {
         if (phase != Phase.HOTWORD || woke) return
+        val espera = esperaDoTom()
+        if (espera > 0) {
+            VozLog.i("listen adiado ${espera}ms (sinal ouvi)")
+            main.removeCallbacks(restart)
+            main.postDelayed(restart, espera)
+            return
+        }
         val ear = recognizer ?: Speech.recognizer(this)?.also {
             it.setRecognitionListener(listener)
             recognizer = it
         } ?: return
+        esquecerDireto()
         try {
             active = ++session
             ear.startListening(Speech.intent())
@@ -338,10 +646,16 @@ class HotwordService : Service() {
 
     private fun dropRecognizer() {
         main.removeCallbacks(restart)
+        main.removeCallbacks(rearm)
+        main.removeCallbacks(armLater)
+        main.removeCallbacks(vigia)
+        esquecerDireto()
         active = -1
-        recognizer?.cancel()
-        recognizer?.destroy()
+        val ear = recognizer ?: return
         recognizer = null
+        VozLog.i("reconhecedor destruído")
+        ear.cancel()
+        ear.destroy()
     }
 
     private fun startInForeground() {
@@ -369,7 +683,11 @@ class HotwordService : Service() {
             Intent(this, HotwordService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_IMMUTABLE
         )
-        val text = if (modo.ativo) getString(R.string.notification_conversa, modo.idioma) else getString(R.string.notification_text)
+        val text = when {
+            pensando -> getString(R.string.notification_pensando)
+            modo.ativo -> getString(R.string.notification_conversa, modo.idioma)
+            else -> getString(R.string.notification_text)
+        }
         return NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle(getString(R.string.notification_title))
@@ -392,6 +710,19 @@ class HotwordService : Service() {
         private const val ACTION_STOP = "app.simba.assistant.STOP"
         private const val GREETING = "Pois não, senhor?"
         private const val REARM_MS = 300L
+        /** Modo conversa: sem nenhum aviso do reconhecedor por este tempo, ele é rearmado. */
+        private const val CONVERSA_VIGIA_MS = 10_000L
+
+        // Sinal "ouvi" ao fim da fala. Ajuste aqui.
+        private const val SINAL_OUVI = true
+        private const val SINAL_SOM = true
+        private const val SINAL_VIBRAR = true
+        private const val TOM_MS = 80L
+        private const val TOM_VOLUME = 30          // 0 a 100, sobre o volume de notificação
+        private const val POS_TOM_MS = 100L        // microfone só reabre depois disto, para o tom não virar eco
+        private const val VIBRAR_MS = 40L
+        private const val FALHA_RECONHECIMENTO =
+            "Meu reconhecimento de voz não funcionou nesse idioma neste aparelho. Voltei ao modo normal."
 
         fun start(context: Context) {
             ContextCompat.startForegroundService(context, Intent(context, HotwordService::class.java))

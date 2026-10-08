@@ -374,6 +374,38 @@ class Roteamento(unittest.TestCase):
         self.assertEqual(len(self.simba.recebidos), 2)
         self.assertEqual(api.chamadas, [])
 
+    def test_app_sai_do_modo_sem_feedback(self):
+        api = ClienteFalso([["Salut !"]])
+        conversa.definir_cliente(api)
+        with self._ws() as ws:
+            self._ativar(ws)
+            ws.send_json({"type": "conversa_sair"})
+            eventos = _ate(ws, _fim_conversa)
+            self.assertEqual([e["type"] for e in eventos], ["modo", "done"])
+            self.assertEqual(eventos[0], {"type": "modo", "ativo": False, "stt": "pt-BR", "voz": server.VOICE,
+                                          "idioma": "português"})
+            self.assertEqual(eventos[1], {"type": "done", "conversa": True})
+            self.assertFalse(server.CONVERSAS)
+
+            ws.send_json({"type": "message", "text": "que horas são", "voice": True, "t": 10})
+            _ate(ws, lambda e: e.get("type") == "done" and not e.get("conversa"))
+        self.assertEqual(len(api.chamadas), 1, "sair pelo app não pode gerar feedback do tutor")
+        self.assertEqual(len(self.simba.recebidos), 2)
+        log = self.saida.getvalue()
+        self.assertIn("[uso] conversa encerrada motivo=app", log)
+        self.assertNotIn("motivo=desconectou", log)
+
+    def test_sair_sem_sessao_e_ignorado(self):
+        api = ClienteFalso([])
+        conversa.definir_cliente(api)
+        with self._ws() as ws:
+            ws.send_json({"type": "conversa_sair"})
+            ws.send_json({"type": "ping", "t": 5})
+            eventos = _ate(ws, lambda e: e.get("type") == "pong")
+            self.assertFalse([e for e in eventos if e["type"] in ("modo", "done", "frase", "error")])
+        self.assertEqual(api.chamadas, [])
+        self.assertNotIn("[uso] conversa encerrada", self.saida.getvalue())
+
     def test_sessoes_isoladas_por_conexao(self):
         api = ClienteFalso([["Salut !"], ["Oui."]])
         conversa.definir_cliente(api)

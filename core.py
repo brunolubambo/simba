@@ -185,13 +185,12 @@ class Simba:
                 await self._reset_session("turnos")
             query_text = self._compose(text)
             load = getattr(self, "_load", {})
-            preview = " ".join(text.split())[:80]
             first_text = False
             first_s = None
             for attempt in (1, 2):
                 await self.start()
                 label = "recebida" if attempt == 1 else "reenvio"
-                print(f"[perf] {time.strftime('%H:%M:%S')} {label} {preview!r} "
+                print(f"[perf] {time.strftime('%H:%M:%S')} {label} chars={len(text)} "
                       f"sistema={load.get('system', '?')}c (prompt={load.get('prompt', '?')} memoria={load.get('memory', '?')}) "
                       f"agentes={load.get('agents', '?')} mcp={load.get('mcp', '?')}", flush=True)
                 pending: list[dict] = []
