@@ -284,6 +284,13 @@ async def ws(socket: WebSocket, token: str = "", device: str = "pc", recursos: s
                     t = asyncio.create_task(run_and_broadcast(data["text"], device, voice=bool(data.get("voice")),
                                                               socket=alvo_conversa))
                 tasks.add(t); t.add_done_callback(tasks.discard)
+            elif kind == "conversa_sair":
+                # O app desistiu do modo (ex.: o reconhecedor não aceita o idioma): sai sem feedback do tutor.
+                sessao = CONVERSAS.get(socket)
+                if sessao is not None:
+                    await _sair_conversa(socket, sessao)
+                    conversa.fechar(sessao, "app")
+                    await socket.send_json({"type": "done", "conversa": True})
             elif kind == "approve":
                 hub.resolve(data.get("id", ""), data.get("ok", False))
             elif kind == "accept":

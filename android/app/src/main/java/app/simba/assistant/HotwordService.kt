@@ -35,6 +35,8 @@ class HotwordService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var modo = ConversaModo.NORMAL
     private var turnStart = 0L
+    private var erros = ErroConversa.Contagem()
+    private var sairPendente = false
 
     private val restart = Runnable { listen() }
     private val rearm = Runnable {
@@ -53,8 +55,10 @@ class HotwordService : Service() {
             VozLog.i("onError ${Speech.nomeErro(error)} fase=$phase stt=${modo.stt}")
             if (active < 0) return
             if (modo.ativo && phase == Phase.COMMAND) {
-                // Silêncio ou nada entendido no modo conversa: continua ouvindo, sem sair do modo.
-                agendarRearm()
+                // Silêncio ou nada entendido continua ouvindo; erro que se repete desiste do modo.
+                val decisao = ErroConversa.decidir(erros, error)
+                erros = decisao.contagem
+                if (decisao.parar) desistirDaConversa(error) else agendarRearm()
                 return
             }
             if (phase == Phase.COMMAND || phase == Phase.YESNO) idle() else scheduleRestart()
@@ -62,12 +66,14 @@ class HotwordService : Service() {
         override fun onResults(results: Bundle?) {
             val chars = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()?.length ?: 0
             VozLog.i("resultado final do reconhecedor chars=$chars fase=$phase")
+            if (chars > 0) erros = ErroConversa.Contagem()
             take(results, partial = false)
             if (phase == Phase.HOTWORD && !woke) scheduleRestart()
         }
         override fun onPartialResults(partialResults: Bundle?) {
             val chars = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()?.length ?: 0
             VozLog.i("parcial chars=$chars fase=$phase")
+            if (chars > 0) erros = ErroConversa.Contagem()
             take(partialResults, partial = true)
         }
     }
@@ -241,6 +247,8 @@ class HotwordService : Service() {
             modo = next
             speaker.voice = next.voz
             reply.clear()
+            erros = ErroConversa.Contagem()
+            sairPendente = false
             VozLog.i("modo conversa início stt=${next.stt}")
             // A instância que ouvia pt-BR não serve para o idioma da prática.
             dropRecognizer()
@@ -259,6 +267,12 @@ class HotwordService : Service() {
 
     /** Fim de um turno do modo conversa (ou do feedback final): espera a fila tocar e reabre o microfone. */
     private fun onTurnDone(encaminhado: Boolean) {
+        if (sairPendente && !modo.ativo) {
+            // Confirmação do conversa_sair: o aviso em português já está tocando e volta ao hotword sozinho.
+            sairPendente = false
+            VozLog.i("modo conversa: saída confirmada pelo servidor")
+            return
+        }
         if (encaminhado) {
             phase = Phase.BUSY
             reply.clear()
@@ -289,7 +303,7 @@ class HotwordService : Service() {
         approvalId = null
         phase = Phase.COMMAND
         if (recognizer == null) {
-            recognizer = Speech.recognizer(this)?.also { it.setRecognitionListener(listener) }
+            recognizer = Speech.recognizer(this, conversa = true)?.also { it.setRecognitionListener(listener) }
             if (recognizer == null) {
                 VozLog.i("listenConversa reconhecedor novo indisponível")
                 return
@@ -299,6 +313,17 @@ class HotwordService : Service() {
             VozLog.i("listenConversa reconhecedor reutilizado")
         }
         arm()
+    }
+
+    /** O reconhecedor não funciona no idioma da prática: avisa em português e volta ao modo normal. */
+    private fun desistirDaConversa(codigo: Int) {
+        VozLog.i("modo conversa: desistindo após ${Speech.nomeErro(codigo)} seguidos=${erros.seguidos} " +
+            "idioma=${erros.idioma} stt=${modo.stt}")
+        erros = ErroConversa.Contagem()
+        sairPendente = link.sairConversa()
+        onModo(ConversaModo.NORMAL)
+        phase = Phase.BUSY
+        speaker.say(FALHA_RECONHECIMENTO, ::idle)
     }
 
     private fun afterSpeech() {
@@ -430,6 +455,8 @@ class HotwordService : Service() {
         private const val ACTION_STOP = "app.simba.assistant.STOP"
         private const val GREETING = "Pois não, senhor?"
         private const val REARM_MS = 300L
+        private const val FALHA_RECONHECIMENTO =
+            "Meu reconhecimento de voz não funcionou nesse idioma neste aparelho. Voltei ao modo normal."
 
         fun start(context: Context) {
             ContextCompat.startForegroundService(context, Intent(context, HotwordService::class.java))

@@ -12,10 +12,22 @@ object Speech {
     const val CONVERSA_SILENCIO_COMPLETO_MS = 1500L
     const val CONVERSA_SILENCIO_POSSIVEL_MS = 1200L
 
-    fun recognizer(context: Context): SpeechRecognizer? {
+    /** Serviço de reconhecimento preferido no modo conversa: o do Google aceita mais idiomas. */
+    private const val GOOGLE_PACKAGE = "com.google.android.googlequicksearchbox"
+
+    /** [conversa]: tenta o serviço do Google antes do escolhido de sempre. */
+    fun recognizer(context: Context, conversa: Boolean = false): SpeechRecognizer? {
         if (!SpeechRecognizer.isRecognitionAvailable(context)) {
             VozLog.i("reconhecedor serviço indisponível")
             return null
+        }
+        if (conversa) {
+            val google = google(context)
+            if (google != null) {
+                VozLog.i("reconhecedor serviço conversa=google pacote=${google.packageName}")
+                return SpeechRecognizer.createSpeechRecognizer(context, google)
+            }
+            VozLog.i("reconhecedor serviço conversa=google ausente, usando o padrão")
         }
         val component = component(context)
         if (component == null) {
@@ -66,5 +78,11 @@ object Speech {
         val found = context.packageManager.queryIntentServices(Intent(RecognitionService.SERVICE_INTERFACE), 0)
         val other = found.firstOrNull { it.serviceInfo.packageName != context.packageName } ?: return null
         return ComponentName(other.serviceInfo.packageName, other.serviceInfo.name)
+    }
+
+    private fun google(context: Context): ComponentName? {
+        val found = context.packageManager.queryIntentServices(Intent(RecognitionService.SERVICE_INTERFACE), 0)
+        val service = found.firstOrNull { it.serviceInfo.packageName == GOOGLE_PACKAGE } ?: return null
+        return ComponentName(service.serviceInfo.packageName, service.serviceInfo.name)
     }
 }

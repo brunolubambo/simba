@@ -240,6 +240,13 @@ class SimbaLink(
         }
     }
 
+    /** Pede ao servidor para encerrar o modo conversa desta conexão, sem feedback. false se não há conexão. */
+    fun sairConversa(): Boolean {
+        val ok = synchronized(lock) { socket }?.send(JSONObject().put("type", "conversa_sair").toString()) ?: false
+        VozLog.i("conversa_sair enviado ok=$ok")
+        return ok
+    }
+
     fun approve(id: String, ok: Boolean) {
         synchronized(lock) { socket }?.send(JSONObject().put("type", "approve").put("id", id).put("ok", ok).toString())
     }
