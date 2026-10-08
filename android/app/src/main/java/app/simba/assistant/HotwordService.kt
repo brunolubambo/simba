@@ -8,6 +8,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -15,6 +17,9 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.speech.RecognitionListener
 import android.speech.SpeechRecognizer
 import androidx.core.app.NotificationCompat
@@ -38,18 +43,37 @@ class HotwordService : Service() {
     private var erros = ErroConversa.Contagem()
     private var sairPendente = false
 
+    // Sinal "ouvi": sessão (active) em que a fala começou e em que o sinal já tocou.
+    private var falouEm = -1
+    private var ouviEm = -1
+    private var silencioAte = 0L
+    private var pensando = false
+    private var tom: ToneGenerator? = null
+
+    // Trava contra pedido repetido: último pedido enviado, apagado no fim do turno.
+    private var ultimoPedido: Repetido.Pedido? = null
+    private var repetidoLogado = -1
+
     private val restart = Runnable { listen() }
     private val rearm = Runnable {
         VozLog.i("rearm fase=$phase stt=${modo.stt}")
         if (modo.ativo && phase == Phase.COMMAND) arm()
     }
+    private val armLater = Runnable { if (phase == Phase.COMMAND || phase == Phase.YESNO) arm() }
 
     private val listener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) { VozLog.start("reconhecedor pronto (onReadyForSpeech) fase=$phase") }
-        override fun onBeginningOfSpeech() { VozLog.i("início da fala (onBeginningOfSpeech)") }
+        override fun onBeginningOfSpeech() {
+            VozLog.i("início da fala (onBeginningOfSpeech)")
+            if (active > 0) falouEm = active
+        }
         override fun onRmsChanged(rmsdB: Float) {}
         override fun onBufferReceived(buffer: ByteArray?) {}
-        override fun onEndOfSpeech() { VozLog.i("fim da fala (onEndOfSpeech)") }
+        override fun onEndOfSpeech() {
+            VozLog.i("fim da fala (onEndOfSpeech)")
+            // Sem hush aqui: cancelar o reconhecedor agora descartaria o resultado final.
+            ouvi(active, phase)
+        }
         override fun onEvent(eventType: Int, params: Bundle?) {}
         override fun onError(error: Int) {
             VozLog.i("onError ${Speech.nomeErro(error)} fase=$phase stt=${modo.stt}")
@@ -67,7 +91,11 @@ class HotwordService : Service() {
             val chars = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()?.length ?: 0
             VozLog.i("resultado final do reconhecedor chars=$chars fase=$phase")
             if (chars > 0) erros = ErroConversa.Contagem()
+            val sessao = active
+            val fase = phase
             take(results, partial = false)
+            // Sem onEndOfSpeech nesta sessão: o sinal toca agora, depois do hush feito pelo take.
+            if (chars > 0) ouvi(sessao, fase)
             if (phase == Phase.HOTWORD && !woke) scheduleRestart()
         }
         override fun onPartialResults(partialResults: Bundle?) {
@@ -86,10 +114,16 @@ class HotwordService : Service() {
             this,
             onText = { reply.append(it).append("\n\n") },
             onDone = {
+                limparTrava()
+                pensar(false)
                 // No modo conversa a resposta do agente (a que ligou o modo) não é falada: o tutor abre a conversa.
                 if (!modo.ativo && approvalId == null && phase != Phase.YESNO) finishReply()
             },
-            onError = { speaker.say(it.ifBlank { "Não consegui concluir." }, ::idle) },
+            onError = {
+                limparTrava()
+                pensar(false)
+                speaker.say(it.ifBlank { "Não consegui concluir." }, ::idle)
+            },
             onApproval = { id, prompt -> askApproval(id, prompt) },
             onNotice = { text -> notice(text) },
             onFrase = { text, idioma, voz -> onFrase(text, idioma, voz) },
@@ -137,7 +171,10 @@ class HotwordService : Service() {
     override fun onDestroy() {
         main.removeCallbacks(restart)
         main.removeCallbacks(rearm)
+        main.removeCallbacks(armLater)
         dropRecognizer()
+        tom?.release()
+        tom = null
         Phone.stop()
         link.close()
         speaker.shutdown()
@@ -176,14 +213,15 @@ class HotwordService : Service() {
 
     private fun onWake(raw: String) {
         if (woke) return
+        val rest = Wake.rest(raw).orEmpty()
+        if (rest.isNotBlank() && repetido(rest)) return
         woke = true
         main.removeCallbacks(restart)
         hush()
-        val rest = Wake.rest(raw).orEmpty()
         if (rest.isNotBlank()) {
             phase = Phase.BUSY
             reply.clear()
-            link.ask(rest)
+            enviar(rest)
         } else {
             phase = Phase.COMMAND
             speaker.sayCached(GREETING) { arm() }
@@ -191,6 +229,10 @@ class HotwordService : Service() {
     }
 
     private fun onCommand(text: String) {
+        if (repetido(text)) {
+            arm()
+            return
+        }
         if (modo.ativo) {
             turnStart = SystemClock.elapsedRealtime()
             VozLog.i("modo conversa: fala do usuário enviada chars=${text.length}")
@@ -198,8 +240,65 @@ class HotwordService : Service() {
         phase = Phase.BUSY
         hush()
         reply.clear()
+        enviar(text)
+    }
+
+    private fun enviar(text: String) {
+        ultimoPedido = if (modo.ativo) null else Repetido.pedido(text, SystemClock.elapsedRealtime())
         link.ask(text)
     }
+
+    /** O mesmo pedido de novo, com o anterior ainda pendente: não reenvia e continua ouvindo. */
+    private fun repetido(text: String): Boolean {
+        if (!Repetido.ignorar(ultimoPedido, text, SystemClock.elapsedRealtime(), modo.ativo)) return false
+        if (repetidoLogado != active) {
+            repetidoLogado = active
+            VozLog.i("comando repetido ignorado chars=${text.length} fase=$phase")
+        }
+        return true
+    }
+
+    private fun limparTrava() {
+        ultimoPedido = null
+    }
+
+    /** Sinal de que a fala foi ouvida: uma vez por sessão, só se houve fala, só ao esperar um comando. */
+    private fun ouvi(sessao: Int, fase: Phase) {
+        if (!SINAL_OUVI || sessao < 0 || falouEm != sessao || ouviEm == sessao) return
+        if (fase != Phase.COMMAND && fase != Phase.YESNO) return
+        ouviEm = sessao
+        silencioAte = SystemClock.elapsedRealtime() + TOM_MS + POS_TOM_MS
+        VozLog.i("ouvi: sinal som=$SINAL_SOM vibrar=$SINAL_VIBRAR fase=$fase")
+        if (SINAL_SOM) tocarTom()
+        if (SINAL_VIBRAR) vibrar()
+        pensar(true)
+    }
+
+    private fun tocarTom() {
+        // STREAM_NOTIFICATION fica mudo no modo silencioso e no vibrar.
+        val gerador = tom ?: runCatching { ToneGenerator(AudioManager.STREAM_NOTIFICATION, TOM_VOLUME) }
+            .getOrNull()?.also { tom = it } ?: return
+        runCatching { gerador.startTone(ToneGenerator.TONE_PROP_BEEP, TOM_MS.toInt()) }
+    }
+
+    private fun vibrar() {
+        val vibrador: Vibrator = (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            getSystemService(VibratorManager::class.java)?.defaultVibrator
+        } else {
+            getSystemService(Vibrator::class.java)
+        }) ?: return
+        if (!vibrador.hasVibrator()) return
+        runCatching { vibrador.vibrate(VibrationEffect.createOneShot(VIBRAR_MS, VibrationEffect.DEFAULT_AMPLITUDE)) }
+    }
+
+    private fun pensar(ligado: Boolean) {
+        if (pensando == ligado) return
+        pensando = ligado
+        refreshNotification()
+    }
+
+    /** Milissegundos que faltam para o tom do "ouvi" acabar (e não entrar no microfone). */
+    private fun esperaDoTom(): Long = silencioAte - SystemClock.elapsedRealtime()
 
     private fun onYesNo(text: String) {
         val id = approvalId
@@ -267,6 +366,8 @@ class HotwordService : Service() {
 
     /** Fim de um turno do modo conversa (ou do feedback final): espera a fila tocar e reabre o microfone. */
     private fun onTurnDone(encaminhado: Boolean) {
+        limparTrava()
+        if (!encaminhado) pensar(false)
         if (sairPendente && !modo.ativo) {
             // Confirmação do conversa_sair: o aviso em português já está tocando e volta ao hotword sozinho.
             sairPendente = false
@@ -302,6 +403,7 @@ class HotwordService : Service() {
         woke = false
         approvalId = null
         phase = Phase.COMMAND
+        pensar(false)
         if (recognizer == null) {
             recognizer = Speech.recognizer(this, conversa = true)?.also { it.setRecognitionListener(listener) }
             if (recognizer == null) {
@@ -343,6 +445,7 @@ class HotwordService : Service() {
     }
 
     private fun idle() {
+        limparTrava()
         if (modo.ativo) {
             listenConversa()
             return
@@ -350,16 +453,25 @@ class HotwordService : Service() {
         woke = false
         approvalId = null
         phase = Phase.HOTWORD
+        pensar(false)
         listen()
     }
 
     private fun hush() {
         active = -1
+        main.removeCallbacks(armLater)
         recognizer?.cancel()
     }
 
     private fun arm() {
         val ear = recognizer ?: return
+        val espera = esperaDoTom()
+        if (espera > 0) {
+            VozLog.i("arm adiado ${espera}ms (sinal ouvi)")
+            main.removeCallbacks(armLater)
+            main.postDelayed(armLater, espera)
+            return
+        }
         active = ++session
         val idioma = if (modo.ativo) modo.stt else ConversaModo.PADRAO_STT
         VozLog.i("arm idioma=$idioma active=$active")
@@ -379,6 +491,13 @@ class HotwordService : Service() {
 
     private fun listen() {
         if (phase != Phase.HOTWORD || woke) return
+        val espera = esperaDoTom()
+        if (espera > 0) {
+            VozLog.i("listen adiado ${espera}ms (sinal ouvi)")
+            main.removeCallbacks(restart)
+            main.postDelayed(restart, espera)
+            return
+        }
         val ear = recognizer ?: Speech.recognizer(this)?.also {
             it.setRecognitionListener(listener)
             recognizer = it
@@ -399,6 +518,7 @@ class HotwordService : Service() {
     private fun dropRecognizer() {
         main.removeCallbacks(restart)
         main.removeCallbacks(rearm)
+        main.removeCallbacks(armLater)
         active = -1
         val ear = recognizer ?: return
         recognizer = null
@@ -432,7 +552,11 @@ class HotwordService : Service() {
             Intent(this, HotwordService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_IMMUTABLE
         )
-        val text = if (modo.ativo) getString(R.string.notification_conversa, modo.idioma) else getString(R.string.notification_text)
+        val text = when {
+            pensando -> getString(R.string.notification_pensando)
+            modo.ativo -> getString(R.string.notification_conversa, modo.idioma)
+            else -> getString(R.string.notification_text)
+        }
         return NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle(getString(R.string.notification_title))
@@ -455,6 +579,15 @@ class HotwordService : Service() {
         private const val ACTION_STOP = "app.simba.assistant.STOP"
         private const val GREETING = "Pois não, senhor?"
         private const val REARM_MS = 300L
+
+        // Sinal "ouvi" ao fim da fala. Ajuste aqui.
+        private const val SINAL_OUVI = true
+        private const val SINAL_SOM = true
+        private const val SINAL_VIBRAR = true
+        private const val TOM_MS = 80L
+        private const val TOM_VOLUME = 30          // 0 a 100, sobre o volume de notificação
+        private const val POS_TOM_MS = 100L        // microfone só reabre depois disto, para o tom não virar eco
+        private const val VIBRAR_MS = 40L
         private const val FALHA_RECONHECIMENTO =
             "Meu reconhecimento de voz não funcionou nesse idioma neste aparelho. Voltei ao modo normal."
 

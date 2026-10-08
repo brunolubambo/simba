@@ -240,7 +240,7 @@ async def lifespan(app):
     telegram.spawn()
     bg = [asyncio.create_task(c) for c in (
         state["simba"].warm(), state["observer"].run(), tasks.reminders_loop(hub), tasks.routines_loop(run_and_broadcast),
-        tasks.mail_loop(hub), tasks.calendar_loop(hub))]
+        tasks.mail_loop(hub), tasks.calendar_loop(hub), conversa.precarregar_vozes())]
     yield
     for t in bg:
         t.cancel()
