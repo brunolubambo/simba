@@ -158,8 +158,12 @@ class Vozes(unittest.TestCase):
 # ---------- cliente da API simulado ----------
 
 class _Fluxo:
-    def __init__(self, pedacos, demora=0.0):
+    """Resposta simulada. `ferramenta`: nome da ferramenta que o modelo pede (ou (nome, entrada)); com
+    `so_stop_reason=True` vem apenas o stop_reason "tool_use", sem bloco de conteudo."""
+
+    def __init__(self, pedacos, demora=0.0, ferramenta=None, so_stop_reason=False):
         self.pedacos, self.demora = pedacos, demora
+        self.ferramenta, self.so_stop_reason = ferramenta, so_stop_reason
 
     async def __aenter__(self):
         return self
@@ -177,8 +181,15 @@ class _Fluxo:
         return gerar()
 
     async def get_final_message(self):
-        return types.SimpleNamespace(stop_reason="end_turn", usage=types.SimpleNamespace(
-            input_tokens=100, output_tokens=20, cache_creation_input_tokens=0, cache_read_input_tokens=80))
+        uso = types.SimpleNamespace(input_tokens=100, output_tokens=20, cache_creation_input_tokens=0,
+                                    cache_read_input_tokens=80)
+        if self.ferramenta is None:
+            return types.SimpleNamespace(stop_reason="end_turn", usage=uso)
+        nome, entrada = self.ferramenta if isinstance(self.ferramenta, tuple) else (self.ferramenta, {})
+        conteudo = [] if self.so_stop_reason else [types.SimpleNamespace(type="text", text="".join(self.pedacos)),
+                                                   types.SimpleNamespace(type="tool_use", id="toolu_x",
+                                                                         name=nome, input=entrada)]
+        return types.SimpleNamespace(stop_reason="tool_use", content=conteudo, usage=uso)
 
 
 class ClienteFalso:
@@ -417,6 +428,81 @@ class Roteamento(unittest.TestCase):
                 self.assertFalse([e for e in eventos if e["type"] in ("frase", "modo")])
                 self.assertEqual(len(server.CONVERSAS), 1)
         self.assertEqual(len(self.simba.recebidos), 2)
+
+
+# ---------- streaming generico (sem Sessao, com ferramenta) ----------
+
+class FalarGenerico(unittest.TestCase):
+    def tearDown(self):
+        conversa.definir_cliente(None)
+
+    def _rodar(self, api, **extra):
+        conversa.definir_cliente(api)
+        enviados, usos = [], []
+
+        async def enviar(ev):
+            enviados.append(ev)
+
+        base = dict(modelo="modelo-x", sistema="sistema", mensagens=[{"role": "user", "content": "oi"}],
+                    max_tokens=50, idioma="pt-BR", voz="pt-BR-AntonioNeural", enviar=enviar, contar=usos.append,
+                    timeout=5)
+        base.update(extra)
+        fala = asyncio.run(conversa.falar_stream(**base))
+        return fala, enviados, usos
+
+    def test_sem_ferramenta_nao_manda_tools_e_conta_o_uso(self):
+        api = ClienteFalso([["Olá. Tudo", " bem?"]])
+        fala, enviados, usos = self._rodar(api)
+        self.assertEqual(fala.faladas, ["Olá.", "Tudo bem?"])
+        self.assertIsNone(fala.ferramenta)
+        self.assertEqual(len(usos), 1)
+        self.assertEqual(usos[0].input_tokens, 100)
+        self.assertEqual([e["text"] for e in enviados], ["Olá.", "Tudo bem?"])
+        self.assertEqual(enviados[0], {"type": "frase", "text": "Olá.", "idioma": "pt-BR", "voz": "pt-BR-AntonioNeural"})
+        chamada = api.chamadas[0]
+        self.assertEqual(chamada["model"], "modelo-x")
+        self.assertEqual(chamada["max_tokens"], 50)
+        self.assertNotIn("tools", chamada)
+
+    def test_ferramenta_antes_de_qualquer_texto(self):
+        api = ClienteFalso([_Fluxo([], ferramenta=("escalar_para_agente", {"motivo": "hora"}))])
+        fala, enviados, _ = self._rodar(api, ferramentas=[{"name": "escalar_para_agente"}])
+        self.assertEqual(fala.faladas, [])
+        self.assertEqual(enviados, [])
+        self.assertEqual(fala.ferramenta, "escalar_para_agente")
+        self.assertEqual(fala.ferramenta_entrada, {"motivo": "hora"})
+        self.assertEqual(api.chamadas[0]["tools"], [{"name": "escalar_para_agente"}])
+
+    def test_ferramenta_depois_de_algum_texto_diz_quantas_frases_sairam(self):
+        api = ClienteFalso([_Fluxo(["Deixe-me ver. ", "Um instante"], ferramenta="escalar_para_agente")])
+        fala, enviados, _ = self._rodar(api, ferramentas=[{"name": "escalar_para_agente"}])
+        self.assertEqual(fala.faladas, ["Deixe-me ver.", "Um instante"])
+        self.assertEqual(len(enviados), 2)
+        self.assertEqual(fala.ferramenta, "escalar_para_agente")
+
+    def test_so_stop_reason_tool_use(self):
+        api = ClienteFalso([_Fluxo([], ferramenta="x", so_stop_reason=True)])
+        fala, _, _ = self._rodar(api, ferramentas=[{"name": "x"}])
+        self.assertEqual(fala.ferramenta, "")
+        self.assertEqual(fala.faladas, [])
+
+    def test_sem_ferramentas_declaradas_o_tool_use_e_ignorado(self):
+        api = ClienteFalso([_Fluxo(["Oi."], ferramenta="x")])
+        fala, _, _ = self._rodar(api)
+        self.assertIsNone(fala.ferramenta)
+
+    def test_excecao_sobe_e_frases_enviadas_ficam_com_o_chamador(self):
+        api = ClienteFalso([_Fluxo(["Primeira. ", "Segunda ", "terceira. "], demora=0.3)])
+        with self.assertRaises(TimeoutError):
+            self._rodar(api, timeout=0.4)
+        api2 = ClienteFalso([RuntimeError("falha simulada")])
+        with self.assertRaises(RuntimeError):
+            self._rodar(api2)
+
+    def test_contar_e_opcional(self):
+        api = ClienteFalso([["Oi."]])
+        fala, _, _ = self._rodar(api, contar=None)
+        self.assertEqual(fala.faladas, ["Oi."])
 
 
 # ---------- uso ----------

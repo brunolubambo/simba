@@ -431,9 +431,33 @@ def _sistema(texto: str) -> list[dict]:
     return [{"type": "text", "text": texto, "cache_control": {"type": "ephemeral"}}]
 
 
-async def _falar(sessao: Sessao, sistema: str, mensagens: list, max_tokens: int, idioma: str, voz: str,
-                 enviar, marcador: MarcadorFim | None) -> tuple[list[str], dict]:
-    """Streaming do modelo para frases. Devolve as frases enviadas e os tempos."""
+@dataclass
+class Fala:
+    """Resultado de um streaming de fala: as frases enviadas, os tempos e a ferramenta chamada (se houve)."""
+    faladas: list[str] = field(default_factory=list)
+    tempos: dict = field(default_factory=dict)
+    ferramenta: str | None = None
+    ferramenta_entrada: dict = field(default_factory=dict)
+
+
+def _ferramenta_chamada(final) -> tuple[str | None, dict]:
+    """Ferramenta (tool_use) pedida na mensagem final: blocos tool_use ou stop_reason == "tool_use"."""
+    for bloco in getattr(final, "content", None) or []:
+        if getattr(bloco, "type", None) == "tool_use":
+            entrada = getattr(bloco, "input", None)
+            return str(getattr(bloco, "name", "") or ""), entrada if isinstance(entrada, dict) else {}
+    if getattr(final, "stop_reason", None) == "tool_use":
+        return "", {}
+    return None, {}
+
+
+async def falar_stream(*, modelo: str, sistema, mensagens: list, max_tokens: int, idioma: str, voz: str, enviar,
+                       marcador: MarcadorFim | None = None, contar=None, timeout: float = TIMEOUT_S,
+                       ferramentas: list | None = None) -> Fala:
+    """Streaming do modelo para frases, sem depender de Sessao. `contar(usage)` recebe o uso da resposta.
+    Se o modelo pedir uma ferramenta, o texto que ele ja escreveu e enviado e `Fala.ferramenta` diz qual
+    (a ferramenta nunca e executada aqui). Se a chamada falhar, a excecao sobe; as frases ja enviadas ficam
+    com quem passou `enviar`."""
     t0 = time.perf_counter()
     tempos = {"token": None, "frase": None}
     divisor = DivisorFrases()
@@ -446,9 +470,11 @@ async def _falar(sessao: Sessao, sistema: str, mensagens: list, max_tokens: int,
             faladas.append(f)
             await enviar({"type": "frase", "text": f, "idioma": idioma, "voz": voz})
 
-    async with asyncio.timeout(TIMEOUT_S):
-        async with cliente().messages.stream(model=MODEL, max_tokens=max_tokens, system=_sistema(sistema),
-                                             messages=mensagens) as stream:
+    extra = {"tools": ferramentas} if ferramentas else {}
+    async with asyncio.timeout(timeout):
+        async with cliente().messages.stream(model=modelo, max_tokens=max_tokens,
+                                             system=sistema if isinstance(sistema, list) else _sistema(sistema),
+                                             messages=mensagens, **extra) as stream:
             async for pedaco in stream.text_stream:
                 if tempos["token"] is None:
                     tempos["token"] = time.perf_counter() - t0
@@ -459,12 +485,23 @@ async def _falar(sessao: Sessao, sistema: str, mensagens: list, max_tokens: int,
                     pedaco = marcador.feed(pedaco)
                 await emitir(divisor.feed(pedaco))
             final = await stream.get_final_message()
-    sessao.contar(getattr(final, "usage", None))
+    if contar is not None:
+        contar(getattr(final, "usage", None))
     if marcador is not None and not marcador.fim:
         await emitir(divisor.feed(marcador.flush()))
     await emitir(divisor.flush())
     tempos["total"] = time.perf_counter() - t0
-    return faladas, tempos
+    nome, entrada = _ferramenta_chamada(final) if ferramentas else (None, {})
+    return Fala(faladas=faladas, tempos=tempos, ferramenta=nome, ferramenta_entrada=entrada)
+
+
+async def _falar(sessao: Sessao, sistema: str, mensagens: list, max_tokens: int, idioma: str, voz: str,
+                 enviar, marcador: MarcadorFim | None) -> tuple[list[str], dict]:
+    """Streaming do modelo do tutor. Devolve as frases enviadas e os tempos."""
+    fala = await falar_stream(modelo=MODEL, sistema=sistema, mensagens=mensagens, max_tokens=max_tokens,
+                              idioma=idioma, voz=voz, enviar=enviar, marcador=marcador, contar=sessao.contar,
+                              timeout=TIMEOUT_S)
+    return fala.faladas, fala.tempos
 
 
 def _perf(rotulo: str, tempos: dict, frases: int) -> None:

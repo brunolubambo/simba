@@ -19,7 +19,7 @@ from .config import ROOT, WORKSPACE, ACCOUNTS, public_url
 from .core import Simba
 from .hub import Hub, save_sub, send_push, vapid, PUSH_TOO
 from .observer import Observer
-from . import tasks, life, google, memory, telegram, celular, pc, conversa, perfil
+from . import tasks, life, google, memory, telegram, celular, pc, conversa, perfil, rapido
 from .agents import roster
 
 TOKEN = os.getenv("SIMBA_TOKEN", "")
@@ -158,7 +158,37 @@ async def conversa_mensagem(socket, sessao, texto: str | None):
         await run_and_broadcast(texto, "celular", voice=True, socket=socket)
 
 
-async def run_and_broadcast(text: str, origin: str, canal: str | None = None, voice: bool = False, socket=None):
+async def via_rapida(socket, device: str, texto: str):
+    """Via rapida: o Haiku responde direto, frase por frase, so para este socket (nada de broadcast).
+    Se ele pedir o agente, ou falhar, o pedido segue pelo caminho de sempre."""
+    vivo = True
+
+    async def enviar(ev):
+        nonlocal vivo
+        try:
+            await socket.send_json(ev)
+        except Exception:                      # o app desconectou: nao ha mais para quem falar
+            vivo = False
+
+    r = await rapido.responder(texto, enviar, VOICE)
+    contexto = ""
+    if r.escalou:
+        if r.frases:                           # o que ja saiu fica; o agente recebe para nao repetir
+            dito = " ".join(r.frases)
+            dito = dito if len(dito) <= rapido.CONTEXTO_MAX else dito[:rapido.CONTEXTO_MAX].rstrip() + "..."
+            contexto = f"[o assistente ja disse: {dito}]"
+        else:
+            await enviar({"type": "frase", "text": rapido.FRASE_ESCALADA, "idioma": "pt-BR", "voz": VOICE})
+        await enviar({"type": "done", "conversa": True, "encaminhado": True})
+    else:
+        await enviar({"type": "done", "conversa": True})
+    rapido.perf(r)
+    if r.escalou and vivo:
+        await run_and_broadcast(texto, device, voice=True, socket=socket, contexto=contexto)
+
+
+async def run_and_broadcast(text: str, origin: str, canal: str | None = None, voice: bool = False, socket=None,
+                            contexto: str = ""):
     user = {"type": "user", "text": text, "device": origin}
     if canal:
         user["canal"] = canal
@@ -168,6 +198,8 @@ async def run_and_broadcast(text: str, origin: str, canal: str | None = None, vo
     await hub.broadcast(user)
     if voice:
         text = "[por voz: 1 ou 2 frases, sem markdown, pronto para falar]\n" + text
+    if contexto:                              # só para o agente; o evento "user" acima já saiu sem isto
+        text = f"{text}\n{contexto}"
     texto_enviado = False
     sessao_nova = None
     final: list[str] = []                    # texto depois da última ferramenta = a resposta final
@@ -279,10 +311,24 @@ async def ws(socket: WebSocket, token: str = "", device: str = "pc", recursos: s
                     print(f"[perf] {time.strftime('%H:%M:%S')} ws recebida (ack imediato) modo=conversa", flush=True)
                     t = asyncio.create_task(conversa_mensagem(socket, sessao, data["text"]))
                 else:
-                    print(f"[perf] {time.strftime('%H:%M:%S')} ws recebida (ack imediato, modelo ainda não começou) "
-                          f"voice={bool(data.get('voice'))}", flush=True)
-                    t = asyncio.create_task(run_and_broadcast(data["text"], device, voice=bool(data.get("voice")),
-                                                              socket=alvo_conversa))
+                    voz = bool(data.get("voice"))
+                    # Via rapida (desligada por padrao): só no app do celular com o recurso "conversa" e fora do
+                    # modo conversa. Pedido detalhado (voice:false) e o que a lista local reconhece vão ao agente.
+                    rapida = False
+                    if alvo_conversa is not None and voz and rapido.ativo():
+                        if rapido.vai_direto_ao_agente(data["text"]):
+                            rapido.RAPIDO_USO["escaladas_lista"] += 1
+                        else:
+                            rapida = True
+                    if rapida:
+                        print(f"[perf] {time.strftime('%H:%M:%S')} ws recebida (ack imediato) modo=rapido "
+                              f"chars={len(data['text'])}", flush=True)
+                        t = asyncio.create_task(via_rapida(socket, device, data["text"]))
+                    else:
+                        print(f"[perf] {time.strftime('%H:%M:%S')} ws recebida (ack imediato, modelo ainda não começou) "
+                              f"voice={voz}", flush=True)
+                        t = asyncio.create_task(run_and_broadcast(data["text"], device, voice=voz,
+                                                                  socket=alvo_conversa))
                 tasks.add(t); t.add_done_callback(tasks.discard)
             elif kind == "conversa_sair":
                 # O app desistiu do modo (ex.: o reconhecedor não aceita o idioma): sai sem feedback do tutor.
@@ -560,9 +606,9 @@ async def tts_stream(job: str, token: str = Query("")):
 
 @app.get("/uso")
 def uso(token: str = Query("")):
-    """Totais do modo conversa desde que o servidor subiu (tokens, turnos, minutos). Sem texto."""
+    """Totais do modo conversa e da via rapida desde que o servidor subiu (tokens, turnos, minutos). Sem texto."""
     check(token)
-    return conversa.uso_total(len(CONVERSAS))
+    return {**conversa.uso_total(len(CONVERSAS)), "rapido": rapido.uso()}
 
 
 @app.get("/health")
