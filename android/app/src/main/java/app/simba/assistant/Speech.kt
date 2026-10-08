@@ -13,10 +13,38 @@ object Speech {
     const val CONVERSA_SILENCIO_POSSIVEL_MS = 1200L
 
     fun recognizer(context: Context): SpeechRecognizer? {
-        if (!SpeechRecognizer.isRecognitionAvailable(context)) return null
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            VozLog.i("reconhecedor serviço indisponível")
+            return null
+        }
         val component = component(context)
-        return if (component != null) SpeechRecognizer.createSpeechRecognizer(context, component)
-        else SpeechRecognizer.createSpeechRecognizer(context)
+        if (component == null) {
+            VozLog.i("reconhecedor serviço pacote=padrão")
+            return SpeechRecognizer.createSpeechRecognizer(context)
+        }
+        VozLog.i("reconhecedor serviço pacote=${component.packageName}")
+        return SpeechRecognizer.createSpeechRecognizer(context, component)
+    }
+
+    /** Nome legível do código de [SpeechRecognizer], para o log. Sem texto falado. */
+    fun nomeErro(code: Int): String {
+        val nome = when (code) {
+            SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "ERROR_NETWORK_TIMEOUT"
+            SpeechRecognizer.ERROR_NETWORK -> "ERROR_NETWORK"
+            SpeechRecognizer.ERROR_AUDIO -> "ERROR_AUDIO"
+            SpeechRecognizer.ERROR_SERVER -> "ERROR_SERVER"
+            SpeechRecognizer.ERROR_CLIENT -> "ERROR_CLIENT"
+            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "ERROR_SPEECH_TIMEOUT"
+            SpeechRecognizer.ERROR_NO_MATCH -> "ERROR_NO_MATCH"
+            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "ERROR_RECOGNIZER_BUSY"
+            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "ERROR_INSUFFICIENT_PERMISSIONS"
+            SpeechRecognizer.ERROR_TOO_MANY_REQUESTS -> "ERROR_TOO_MANY_REQUESTS"
+            SpeechRecognizer.ERROR_SERVER_DISCONNECTED -> "ERROR_SERVER_DISCONNECTED"
+            SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED -> "ERROR_LANGUAGE_NOT_SUPPORTED"
+            SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> "ERROR_LANGUAGE_UNAVAILABLE"
+            else -> "ERROR_DESCONHECIDO"
+        }
+        return "$nome=$code"
     }
 
     fun intent(): Intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {

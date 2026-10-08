@@ -96,3 +96,23 @@ class ConversaModoTest {
         assertEquals("en-US", ConversaModo.idiomaDaFrase(null, m))
     }
 }
+
+class SpeechErroTest {
+    @Test
+    fun nomeDoCodigoDoReconhecedor() {
+        assertEquals("ERROR_NETWORK_TIMEOUT=1", Speech.nomeErro(1))
+        assertEquals("ERROR_NETWORK=2", Speech.nomeErro(2))
+        assertEquals("ERROR_AUDIO=3", Speech.nomeErro(3))
+        assertEquals("ERROR_SERVER=4", Speech.nomeErro(4))
+        assertEquals("ERROR_CLIENT=5", Speech.nomeErro(5))
+        assertEquals("ERROR_SPEECH_TIMEOUT=6", Speech.nomeErro(6))
+        assertEquals("ERROR_NO_MATCH=7", Speech.nomeErro(7))
+        assertEquals("ERROR_RECOGNIZER_BUSY=8", Speech.nomeErro(8))
+        assertEquals("ERROR_INSUFFICIENT_PERMISSIONS=9", Speech.nomeErro(9))
+        assertEquals("ERROR_TOO_MANY_REQUESTS=10", Speech.nomeErro(10))
+        assertEquals("ERROR_SERVER_DISCONNECTED=11", Speech.nomeErro(11))
+        assertEquals("ERROR_LANGUAGE_NOT_SUPPORTED=12", Speech.nomeErro(12))
+        assertEquals("ERROR_LANGUAGE_UNAVAILABLE=13", Speech.nomeErro(13))
+        assertEquals("ERROR_DESCONHECIDO=14", Speech.nomeErro(14))
+    }
+}
