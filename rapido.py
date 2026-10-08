@@ -147,6 +147,67 @@ def prompt_sistema(p: dict | None = None, agora: str | None = None) -> str:
     )
 
 
+# ---------- historico curto da via rapida (so em memoria) ----------
+
+# Nunca vai para disco nem para o log. Guarda so o que o Haiku respondeu sozinho; edite as constantes a vontade.
+DISPOSITIVO = "celular"            # a via rapida so existe no app do celular
+HISTORICO_TROCAS = 3               # quantas trocas (pergunta + resposta) o Haiku e o agente enxergam
+HISTORICO_TEXTO_MAX = 300          # caracteres de cada texto guardado (pergunta e resposta)
+HISTORICO_EXPIRA_S = 30 * 60       # sem trocas por este tempo, o historico do dispositivo e esquecido
+
+# dispositivo -> {"ultima": instante da ultima troca registrada, "trocas": [{"pergunta","resposta","entregue"}]}
+_HISTORICO: dict[str, dict] = {}
+
+
+def _cortar(texto, limite: int) -> str:
+    limpo = " ".join(str(texto or "").split())
+    return limpo if len(limpo) <= limite else limpo[:limite - 3].rstrip() + "..."
+
+
+def _vivo(device: str, agora: float) -> dict | None:
+    """O historico do dispositivo, ou None se nao ha ou se expirou (nesse caso ele e apagado)."""
+    dados = _HISTORICO.get(device)
+    if dados is not None and agora - dados["ultima"] > HISTORICO_EXPIRA_S:
+        _HISTORICO.pop(device, None)
+        return None
+    return dados
+
+
+def registrar(device: str, pergunta: str, resposta: str, agora: float | None = None) -> None:
+    """Guarda uma troca que o Haiku respondeu sozinho. Mantem so as ultimas HISTORICO_TROCAS. Texto vazio nao entra."""
+    agora = time.monotonic() if agora is None else agora
+    pergunta, resposta = _cortar(pergunta, HISTORICO_TEXTO_MAX), _cortar(resposta, HISTORICO_TEXTO_MAX)
+    if not pergunta or not resposta:
+        return
+    dados = _vivo(device, agora)
+    if dados is None:
+        dados = _HISTORICO[device] = {"ultima": agora, "trocas": []}
+    dados["trocas"].append({"pergunta": pergunta, "resposta": resposta, "entregue": False})
+    del dados["trocas"][:-HISTORICO_TROCAS]
+    dados["ultima"] = agora
+
+
+def recentes(device: str, agora: float | None = None) -> list[tuple[str, str]]:
+    """As trocas guardadas, da mais antiga para a mais nova, como (pergunta, resposta). Ler nao renova o prazo."""
+    agora = time.monotonic() if agora is None else agora
+    dados = _vivo(device, agora)
+    return [(t["pergunta"], t["resposta"]) for t in dados["trocas"]] if dados else []
+
+
+def limpar(device: str) -> None:
+    _HISTORICO.pop(device, None)
+
+
+def _mensagens(device: str, texto: str) -> list[dict]:
+    """Trocas anteriores como turnos reais (user/assistant alternados), e por fim a mensagem atual."""
+    mensagens: list[dict] = []
+    for pergunta, resposta in recentes(device):
+        mensagens.append({"role": "user", "content": pergunta})
+        mensagens.append({"role": "assistant", "content": resposta})
+    mensagens.append({"role": "user", "content": texto})
+    return mensagens
+
+
 # ---------- resposta do Haiku, frase por frase ----------
 
 @dataclass
@@ -158,13 +219,15 @@ class Resultado:
     total: float = 0.0
 
 
-async def responder(texto: str, enviar, voz: str, idioma: str = "pt-BR") -> Resultado:
+async def responder(texto: str, enviar, voz: str, idioma: str = "pt-BR", device: str = DISPOSITIVO) -> Resultado:
     """Pede a resposta ao Haiku e manda cada frase por `enviar` assim que fecha. Nunca levanta excecao:
-    timeout, erro da API, resposta vazia ou falta de chave viram escalou=True, motivo="falha"."""
+    timeout, erro da API, resposta vazia ou falta de chave viram escalou=True, motivo="falha".
+    O Haiku recebe as trocas anteriores do dispositivo; a troca de agora so entra no historico se ele a
+    respondeu sozinho (sem escalar) e falou ao menos uma frase."""
     t0 = time.perf_counter()
     res = Resultado()
 
-    async def registrar(ev):
+    async def captar(ev):
         if ev.get("type") == "frase":
             if res.primeira_frase is None:
                 res.primeira_frase = time.perf_counter() - t0
@@ -175,8 +238,8 @@ async def responder(texto: str, enviar, voz: str, idioma: str = "pt-BR") -> Resu
         if conversa._CLIENTE is None and not os.getenv("ANTHROPIC_API_KEY"):
             raise RuntimeError("sem ANTHROPIC_API_KEY")
         fala = await conversa.falar_stream(
-            modelo=modelo(), sistema=prompt_sistema(), mensagens=[{"role": "user", "content": texto}],
-            max_tokens=max_tokens(), idioma=idioma, voz=voz, enviar=registrar, contar=contar,
+            modelo=modelo(), sistema=prompt_sistema(), mensagens=_mensagens(device, texto),
+            max_tokens=max_tokens(), idioma=idioma, voz=voz, enviar=captar, contar=contar,
             timeout=timeout_s(), ferramentas=[FERRAMENTA])
     except Exception as e:
         print(f"[rapido] falha ({type(e).__name__})", flush=True)
@@ -192,6 +255,7 @@ async def responder(texto: str, enviar, voz: str, idioma: str = "pt-BR") -> Resu
             res.escalou, res.motivo = True, "falha"
         else:
             RAPIDO_USO["rapidas"] += 1
+            registrar(device, texto, " ".join(res.frases))
     res.total = time.perf_counter() - t0
     return res
 

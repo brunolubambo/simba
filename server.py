@@ -170,7 +170,7 @@ async def via_rapida(socket, device: str, texto: str):
         except Exception:                      # o app desconectou: nao ha mais para quem falar
             vivo = False
 
-    r = await rapido.responder(texto, enviar, VOICE)
+    r = await rapido.responder(texto, enviar, VOICE, device=device)
     contexto = ""
     if r.escalou:
         if r.frases:                           # o que ja saiu fica; o agente recebe para nao repetir

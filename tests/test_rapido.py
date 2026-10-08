@@ -190,6 +190,7 @@ class Rota(_Ambiente):
         from fastapi.testclient import TestClient
         self.antes = dict(server.state)
         self.contadores = dict(rapido.RAPIDO_USO)
+        rapido.limpar(rapido.DISPOSITIVO)        # historico da via rapida e estado do processo: cada teste comeca limpo
         self.simba = SimbaFalso()
         server.state["simba"] = self.simba
         server.state["observer"] = types.SimpleNamespace(enabled=False, available=False)
