@@ -43,6 +43,21 @@ class ErroConversaTest {
     }
 
     @Test
+    fun resultadoVazioNaConversaRearma() {
+        assertTrue(ErroConversa.rearmarSemTexto(conversa = true, comando = true, sessao = 3, texto = ""))
+        assertTrue(ErroConversa.rearmarSemTexto(conversa = true, comando = true, sessao = 3, texto = "   "))
+        assertTrue(ErroConversa.rearmarSemTexto(conversa = true, comando = true, sessao = 3, texto = null))
+    }
+
+    @Test
+    fun resultadoComTextoOuForaDaConversaNaoRearma() {
+        assertFalse(ErroConversa.rearmarSemTexto(conversa = true, comando = true, sessao = 3, texto = "hello"))
+        assertFalse(ErroConversa.rearmarSemTexto(conversa = false, comando = true, sessao = 3, texto = ""))
+        assertFalse(ErroConversa.rearmarSemTexto(conversa = true, comando = false, sessao = 3, texto = ""))
+        assertFalse("sessão cancelada de propósito", ErroConversa.rearmarSemTexto(conversa = true, comando = true, sessao = -1, texto = ""))
+    }
+
+    @Test
     fun contagemComecaZerada() {
         val d = ErroConversa.decidir(ErroConversa.Contagem(), 5)
         assertFalse(d.parar)

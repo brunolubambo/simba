@@ -26,4 +26,8 @@ object ErroConversa {
         val depois = Contagem(seguidos = antes.seguidos + 1, idioma = if (idioma) antes.idioma + 1 else 0)
         return Decisao(depois, depois.idioma >= MAX_IDIOMA || depois.seguidos >= MAX_SEGUIDOS)
     }
+
+    /** Resultado final sem texto útil no modo conversa, com a sessão ainda viva: rearmar, como no silêncio. */
+    fun rearmarSemTexto(conversa: Boolean, comando: Boolean, sessao: Int, texto: String?): Boolean =
+        conversa && comando && sessao >= 0 && texto.isNullOrBlank()
 }
