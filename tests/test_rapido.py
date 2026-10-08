@@ -2,17 +2,20 @@
 
 Frases e valores falsos de proposito.
 """
+import contextlib
+import io
 import os
 import types
 import unittest
 
 try:  # `discover -s tests` (modulo de topo) ou `unittest tests.test_rapido`
-    from test_conversa import _carregar
+    from test_conversa import (_carregar, _ate, _fim_conversa, ClienteFalso, SimbaFalso, _Fluxo, VOZES, TOKEN)
 except ImportError:  # pragma: no cover
-    from tests.test_conversa import _carregar
+    from tests.test_conversa import (_carregar, _ate, _fim_conversa, ClienteFalso, SimbaFalso, _Fluxo, VOZES, TOKEN)
 
 rapido = _carregar("simba.rapido")
 conversa = _carregar("simba.conversa")
+server = _carregar("simba.server")
 
 VARIAVEIS = ("RAPIDO_ATIVO", "RAPIDO_MODEL", "RAPIDO_MAX_TOKENS", "RAPIDO_TIMEOUT_S", "CONVERSA_MODEL")
 
@@ -173,6 +176,159 @@ class Contadores(_Ambiente):
                       "ativo", "modelo"):
             self.assertIn(campo, u)
         self.assertFalse(u["ativo"])
+
+
+# ---------- rota do websocket ----------
+
+def _fim_do_agente(ev):
+    return ev.get("type") == "done" and not ev.get("conversa")
+
+
+class Rota(_Ambiente):
+    def setUp(self):
+        super().setUp()
+        from fastapi.testclient import TestClient
+        self.antes = dict(server.state)
+        self.contadores = dict(rapido.RAPIDO_USO)
+        self.simba = SimbaFalso()
+        server.state["simba"] = self.simba
+        server.state["observer"] = types.SimpleNamespace(enabled=False, available=False)
+        server.CONVERSAS.clear()
+        conversa.definir_vozes(VOZES)
+        conversa.tomar_pedido()
+        os.environ["RAPIDO_ATIVO"] = "true"
+        self.http = TestClient(server.app)
+        self.saida = io.StringIO()
+        self._log = contextlib.redirect_stdout(self.saida)
+        self._log.__enter__()
+
+    def tearDown(self):
+        self._log.__exit__(None, None, None)
+        conversa.definir_cliente(None)
+        server.CONVERSAS.clear()
+        server.state.clear()
+        server.state.update(self.antes)
+        super().tearDown()
+
+    def _ws(self, recursos="conversa", device="celular"):
+        return self.http.websocket_connect(f"/ws?token={TOKEN}&device={device}&recursos={recursos}")
+
+    def _delta(self, campo):
+        return rapido.RAPIDO_USO[campo] - self.contadores[campo]
+
+    def _perguntar(self, ws, texto, voice=True, t=1):
+        ws.send_json({"type": "message", "text": texto, "voice": voice, "t": t})
+
+    # --- via rapida ---
+
+    def test_so_texto_responde_frase_a_frase_sem_chamar_o_agente(self):
+        api = ClienteFalso([["Boa tarde. Em que", " posso ajudar?"]])
+        conversa.definir_cliente(api)
+        with self._ws() as ws:
+            self._perguntar(ws, "boa tarde")
+            eventos = _ate(ws, _fim_conversa)
+        self.assertIn({"type": "ack", "t": 1}, eventos)
+        eventos = [e for e in eventos if e["type"] != "status"]
+        frases = [e for e in eventos if e["type"] == "frase"]
+        self.assertEqual([f["text"] for f in frases], ["Boa tarde.", "Em que posso ajudar?"])
+        self.assertEqual({(f["idioma"], f["voz"]) for f in frases}, {("pt-BR", server.VOICE)})
+        self.assertEqual(eventos[-1], {"type": "done", "conversa": True})
+        self.assertNotIn("encaminhado", eventos[-1])
+        self.assertEqual(self.simba.recebidos, [], "o agente completo nao pode ser chamado")
+        self.assertEqual({e["type"] for e in eventos}, {"ack", "frase", "done"})
+        self.assertEqual(self._delta("rapidas"), 1)
+        chamada = api.chamadas[0]
+        self.assertEqual(chamada["model"], rapido.modelo())
+        self.assertEqual(chamada["max_tokens"], 200)
+        self.assertEqual([t["name"] for t in chamada["tools"]], ["escalar_para_agente"])
+        self.assertEqual(chamada["messages"], [{"role": "user", "content": "boa tarde"}])
+        self.assertNotIn("Notas", chamada["system"][0]["text"])
+
+    def test_resposta_vai_so_para_o_socket_que_perguntou(self):
+        conversa.definir_cliente(ClienteFalso([["Tudo bem."]]))
+        with self._ws() as ws1, self._ws(recursos="", device="pc") as ws2:
+            self._perguntar(ws1, "tudo bem?")
+            _ate(ws1, _fim_conversa)
+            ws2.send_json({"type": "ping", "t": 9})
+            eventos = _ate(ws2, lambda e: e.get("type") == "pong")
+        self.assertFalse([e for e in eventos if e["type"] in ("frase", "done", "text", "user")])
+
+    def test_lista_local_vai_ao_agente_sem_chamar_o_haiku(self):
+        api = ClienteFalso([])
+        conversa.definir_cliente(api)
+        with self._ws() as ws:
+            self._perguntar(ws, "que horas são")
+            eventos = _ate(ws, _fim_do_agente)
+        self.assertFalse([e for e in eventos if e["type"] == "frase"])
+        self.assertEqual(len(self.simba.recebidos), 1)
+        self.assertEqual(api.chamadas, [])
+        self.assertEqual(self._delta("escaladas_lista"), 1)
+
+    def test_sem_o_recurso_conversa_nunca_entra(self):
+        api = ClienteFalso([])
+        conversa.definir_cliente(api)
+        for recursos, device in (("", "celular"), ("conversa", "pc"), ("", "pc")):
+            with self._ws(recursos=recursos, device=device) as ws:
+                self._perguntar(ws, "boa tarde")
+                eventos = _ate(ws, _fim_do_agente)
+            self.assertFalse([e for e in eventos if e["type"] == "frase"], (recursos, device))
+        self.assertEqual(len(self.simba.recebidos), 3)
+        self.assertEqual(api.chamadas, [])
+        self.assertEqual(self._delta("escaladas_lista"), 0, "so conta quando o celular com conversa poderia usar a via")
+
+    def test_desligada_nada_muda(self):
+        for valor in (None, "false"):
+            if valor is None:
+                os.environ.pop("RAPIDO_ATIVO", None)
+            else:
+                os.environ["RAPIDO_ATIVO"] = valor
+            api = ClienteFalso([])
+            conversa.definir_cliente(api)
+            with self._ws() as ws:
+                self._perguntar(ws, "boa tarde")
+                eventos = _ate(ws, _fim_do_agente)
+            self.assertFalse([e for e in eventos if e["type"] == "frase"])
+            self.assertEqual(api.chamadas, [])
+        self.assertEqual(len(self.simba.recebidos), 2)
+        self.assertEqual(self._delta("escaladas_lista"), 0)
+        self.assertEqual(self._delta("rapidas"), 0)
+
+    def test_pedido_detalhado_voice_false_vai_ao_agente(self):
+        api = ClienteFalso([])
+        conversa.definir_cliente(api)
+        with self._ws() as ws:
+            self._perguntar(ws, "explique a revolucao francesa", voice=False)
+            _ate(ws, _fim_do_agente)
+        self.assertEqual(len(self.simba.recebidos), 1)
+        self.assertEqual(api.chamadas, [])
+
+    def test_modo_conversa_continua_igual(self):
+        api = ClienteFalso([["Bonjour !"], ["Oui."]])
+        conversa.definir_cliente(api)
+        with self._ws() as ws:
+            self._perguntar(ws, "quero praticar francês")
+            _ate(ws, _fim_conversa)
+            self._perguntar(ws, "bonjour", t=2)
+            eventos = _ate(ws, _fim_conversa)
+        self.assertEqual([e["text"] for e in eventos if e["type"] == "frase"], ["Oui."])
+        self.assertNotIn("tools", api.chamadas[1])
+        self.assertEqual(self._delta("rapidas"), 0)
+
+    def test_uso_mostra_o_bloco_rapido(self):
+        conversa.definir_cliente(ClienteFalso([["Oi."]]))
+        with self._ws() as ws:
+            self._perguntar(ws, "oi")
+            _ate(ws, _fim_conversa)
+        self.assertEqual(self.http.get("/uso").status_code, 401)
+        r = self.http.get(f"/uso?token={TOKEN}")
+        self.assertEqual(r.status_code, 200)
+        corpo = r.json()
+        self.assertIn("modelo", corpo)
+        bloco = corpo["rapido"]
+        for campo in ("rapidas", "escaladas_haiku", "escaladas_lista", "falhas", "tokens_entrada", "tokens_saida"):
+            self.assertIn(campo, bloco)
+        self.assertGreaterEqual(bloco["rapidas"], 1)
+        self.assertGreaterEqual(bloco["tokens_entrada"], 180)
 
 
 if __name__ == "__main__":

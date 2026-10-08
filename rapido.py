@@ -11,6 +11,7 @@ import os
 import re
 import time
 import unicodedata
+from dataclasses import dataclass, field
 
 from . import conversa, perfil
 from .config import now_label
@@ -142,6 +143,55 @@ def prompt_sistema(p: dict | None = None, agora: str | None = None) -> str:
         f"simular uma situacao (entrevista, negociacao, debate), ou se estiver em duvida: chame a "
         f"ferramenta {FERRAMENTA_NOME} ANTES de escrever qualquer texto."
     )
+
+
+# ---------- resposta do Haiku, frase por frase ----------
+
+@dataclass
+class Resultado:
+    frases: list = field(default_factory=list)    # frases que ja SAIRAM para o app (ficam, mesmo se escalar)
+    escalou: bool = False
+    motivo: str = ""                              # "" | "haiku" (chamou a ferramenta) | "falha"
+    primeira_frase: float | None = None
+    total: float = 0.0
+
+
+async def responder(texto: str, enviar, voz: str, idioma: str = "pt-BR") -> Resultado:
+    """Pede a resposta ao Haiku e manda cada frase por `enviar` assim que fecha. Nunca levanta excecao:
+    timeout, erro da API, resposta vazia ou falta de chave viram escalou=True, motivo="falha"."""
+    t0 = time.perf_counter()
+    res = Resultado()
+
+    async def registrar(ev):
+        if ev.get("type") == "frase":
+            if res.primeira_frase is None:
+                res.primeira_frase = time.perf_counter() - t0
+            res.frases.append(ev.get("text", ""))
+        await enviar(ev)
+
+    try:
+        if conversa._CLIENTE is None and not os.getenv("ANTHROPIC_API_KEY"):
+            raise RuntimeError("sem ANTHROPIC_API_KEY")
+        fala = await conversa.falar_stream(
+            modelo=modelo(), sistema=prompt_sistema(), mensagens=[{"role": "user", "content": texto}],
+            max_tokens=max_tokens(), idioma=idioma, voz=voz, enviar=registrar, contar=contar,
+            timeout=timeout_s(), ferramentas=[FERRAMENTA])
+    except Exception as e:
+        print(f"[rapido] falha ({type(e).__name__})", flush=True)
+        RAPIDO_USO["falhas"] += 1
+        res.escalou, res.motivo = True, "falha"
+    else:
+        if fala.ferramenta is not None:
+            RAPIDO_USO["escaladas_haiku"] += 1
+            res.escalou, res.motivo = True, "haiku"
+        elif not res.frases:
+            print("[rapido] falha (resposta vazia)", flush=True)
+            RAPIDO_USO["falhas"] += 1
+            res.escalou, res.motivo = True, "falha"
+        else:
+            RAPIDO_USO["rapidas"] += 1
+    res.total = time.perf_counter() - t0
+    return res
 
 
 # ---------- contadores em memoria (padrao de conversa.USO_TOTAL) ----------
