@@ -173,9 +173,25 @@ def _resumo_agente() -> str:
     return limpo[:rapido.CONTEXTO_AGENTE_MAX]
 
 
-async def via_rapida(socket, device: str, texto: str):
+class FilaRapida:
+    """Uma por conexao do celular com a via rapida: o lock faz as perguntas seguidas falarem uma de cada vez,
+    na ordem de chegada (asyncio.Lock atende na ordem), para as frases nao se misturarem. `aberta` vira False
+    quando o app desconecta: quem ainda esperava a vez desiste sem chamar o Haiku."""
+
+    def __init__(self):
+        self.trava = asyncio.Lock()
+        self.aberta = True
+
+
+FILAS_RAPIDAS: dict = {}      # WebSocket do celular -> FilaRapida (criada na conexao, descartada ao desconectar)
+
+
+async def via_rapida(socket, device: str, texto: str, fila: FilaRapida | None = None):
     """Via rapida: o Haiku responde direto, frase por frase, so para este socket (nada de broadcast).
-    Se ele pedir o agente, ou falhar, o pedido segue pelo caminho de sempre."""
+    Se ele pedir o agente, ou falhar, o pedido segue pelo caminho de sempre.
+    A fala do Haiku (do inicio ate o "done") e serializada por `fila`; o agente roda depois de soltar a vez,
+    entao uma escalada demorada nao segura as perguntas seguintes."""
+    fila = fila or FilaRapida()
     vivo = True
 
     async def enviar(ev):
@@ -185,20 +201,23 @@ async def via_rapida(socket, device: str, texto: str):
         except Exception:                      # o app desconectou: nao ha mais para quem falar
             vivo = False
 
-    r = await rapido.responder(texto, enviar, VOICE, device=device, contexto_agente=_resumo_agente())
-    contexto = ""
-    if r.escalou:
-        if r.frases:                           # o que ja saiu fica; o agente recebe para nao repetir
-            dito = " ".join(r.frases)
-            dito = dito if len(dito) <= rapido.CONTEXTO_MAX else dito[:rapido.CONTEXTO_MAX].rstrip() + "..."
-            contexto = f"[o assistente ja disse: {dito}]"
+    async with fila.trava:
+        if not fila.aberta:                    # desconectou enquanto esperava a vez
+            return
+        r = await rapido.responder(texto, enviar, VOICE, device=device, contexto_agente=_resumo_agente())
+        contexto = ""
+        if r.escalou:
+            if r.frases:                       # o que ja saiu fica; o agente recebe para nao repetir
+                dito = " ".join(r.frases)
+                dito = dito if len(dito) <= rapido.CONTEXTO_MAX else dito[:rapido.CONTEXTO_MAX].rstrip() + "..."
+                contexto = f"[o assistente ja disse: {dito}]"
+            else:
+                await enviar({"type": "frase", "text": rapido.FRASE_ESCALADA, "idioma": "pt-BR", "voz": VOICE})
+            await enviar({"type": "done", "conversa": True, "encaminhado": True})
         else:
-            await enviar({"type": "frase", "text": rapido.FRASE_ESCALADA, "idioma": "pt-BR", "voz": VOICE})
-        await enviar({"type": "done", "conversa": True, "encaminhado": True})
-    else:
-        await enviar({"type": "done", "conversa": True})
-    rapido.perf(r)
-    if r.escalou and vivo:
+            await enviar({"type": "done", "conversa": True})
+        rapido.perf(r)
+    if r.escalou and vivo and fila.aberta:
         await run_and_broadcast(texto, device, voice=True, socket=socket, contexto=contexto)
 
 
@@ -306,6 +325,9 @@ async def ws(socket: WebSocket, token: str = "", device: str = "pc", recursos: s
     await socket.accept()
     # Modo conversa só no app do celular que sabe tocar os eventos "frase" e "modo".
     alvo_conversa = socket if device == "celular" and "conversa" in recursos.split(",") else None
+    fila = FilaRapida() if alvo_conversa is not None else None
+    if fila is not None:
+        FILAS_RAPIDAS[socket] = fila
     hub.add(socket, device)
     await hub.broadcast(status())
     tasks = set()
@@ -338,7 +360,7 @@ async def ws(socket: WebSocket, token: str = "", device: str = "pc", recursos: s
                     if rapida:
                         print(f"[perf] {time.strftime('%H:%M:%S')} ws recebida (ack imediato) modo=rapido "
                               f"chars={len(data['text'])}", flush=True)
-                        t = asyncio.create_task(via_rapida(socket, device, data["text"]))
+                        t = asyncio.create_task(via_rapida(socket, device, data["text"], fila))
                     else:
                         print(f"[perf] {time.strftime('%H:%M:%S')} ws recebida (ack imediato, modelo ainda não começou) "
                               f"voice={voz}", flush=True)
@@ -370,6 +392,9 @@ async def ws(socket: WebSocket, token: str = "", device: str = "pc", recursos: s
         pass
     finally:
         hub.remove(socket)
+        fila_fechada = FILAS_RAPIDAS.pop(socket, None)
+        if fila_fechada is not None:
+            fila_fechada.aberta = False        # quem esperava a vez desiste; o lock some junto com a fila
         sessao = CONVERSAS.pop(socket, None)
         if sessao is not None:
             conversa.fechar(sessao, "desconectou")

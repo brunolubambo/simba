@@ -295,6 +295,7 @@ class RotaBase(_Limpo):
         server.state["simba"] = self.simba
         server.state["observer"] = types.SimpleNamespace(enabled=False, available=False)
         server.CONVERSAS.clear()
+        server.FILAS_RAPIDAS.clear()
         conversa.definir_vozes(VOZES)
         conversa.tomar_pedido()
         os.environ["RAPIDO_ATIVO"] = "true"
@@ -302,6 +303,7 @@ class RotaBase(_Limpo):
 
     def tearDown(self):
         server.CONVERSAS.clear()
+        server.FILAS_RAPIDAS.clear()
         server.state.clear()
         server.state.update(self.antes)
         super().tearDown()
@@ -812,6 +814,225 @@ class RotaPonte(RotaBase):
         self.assertIn("tres reunioes", resumo)
         self.assertNotIn("por voz", resumo)
         self.assertLessEqual(len(resumo.split(": ", 1)[1]), rapido.CONTEXTO_AGENTE_MAX)
+
+
+# ---------- passo 3: uma frase de cada vez por conexao ----------
+
+class SimbaLento(SimbaFalso):
+    """O agente demora para responder (para provar que a via rapida nao espera por ele)."""
+
+    def __init__(self, demora=0.6):
+        super().__init__()
+        self.demora = demora
+
+    async def ask(self, text):
+        self.recebidos.append(text)
+        await asyncio.sleep(self.demora)
+        yield {"type": "text", "text": "resposta do agente"}
+        yield {"type": "done", "cost_usd": 0}
+
+
+def _fim_do_agente(ev):
+    return ev.get("type") == "done" and not ev.get("conversa")
+
+
+def _tipos(eventos):
+    return [e["type"] for e in eventos if e["type"] not in ("status", "ack")]
+
+
+class SerializacaoDaViaRapida(RotaBase):
+    def _esperar(self, condicao, limite_s=3.0):
+        import time
+        fim = time.monotonic() + limite_s
+        while time.monotonic() < fim:
+            if condicao():
+                return True
+            time.sleep(0.02)
+        return condicao()
+
+    def test_duas_mensagens_seguidas_falam_em_ordem_sem_intercalar(self):
+        api = ClienteFalso([_Fluxo(["Primeira A.", " Primeira B."], demora=0.15), ["Segunda unica."]])
+        conversa.definir_cliente(api)
+        with self._ws() as ws:
+            self._perguntar(ws, "me explica a primeira coisa", t=1)
+            self._perguntar(ws, "e a segunda coisa", t=2)
+            vistos = []
+            dones = 0
+            while dones < 2:
+                ev = ws.receive_json()
+                vistos.append(ev)
+                dones += ev.get("type") == "done"
+        self.assertEqual(_tipos(vistos), ["frase", "frase", "done", "frase", "done"])
+        self.assertEqual([e["text"] for e in vistos if e["type"] == "frase"],
+                         ["Primeira A.", "Primeira B.", "Segunda unica."])
+        self.assertEqual(self.simba.recebidos, [])
+
+    def test_a_segunda_ja_enxerga_a_primeira_no_historico(self):
+        api = ClienteFalso([_Fluxo(["Resposta um."], demora=0.15), ["Resposta dois."]])
+        conversa.definir_cliente(api)
+        with self._ws() as ws:
+            self._perguntar(ws, "primeira pergunta", t=1)
+            self._perguntar(ws, "e em ingles", t=2)
+            dones = 0
+            while dones < 2:
+                dones += ws.receive_json().get("type") == "done"
+        self.assertEqual([m["content"] for m in api.chamadas[1]["messages"]],
+                         ["primeira pergunta", "Resposta um.", "e em ingles"])
+
+    def test_tres_mensagens_mantem_a_ordem_de_chegada(self):
+        api = ClienteFalso([_Fluxo(["Um."], demora=0.1), _Fluxo(["Dois."], demora=0.05), ["Tres."]])
+        conversa.definir_cliente(api)
+        with self._ws() as ws:
+            for i, texto in enumerate(("um", "dois", "tres"), start=1):
+                self._perguntar(ws, texto, t=i)
+            frases, dones = [], 0
+            while dones < 3:
+                ev = ws.receive_json()
+                dones += ev.get("type") == "done"
+                if ev.get("type") == "frase":
+                    frases.append(ev["text"])
+        self.assertEqual(frases, ["Um.", "Dois.", "Tres."])
+        self.assertEqual([c["messages"][-1]["content"] for c in api.chamadas], ["um", "dois", "tres"])
+
+    def test_lock_liberado_quando_a_primeira_falha(self):
+        api = ClienteFalso([RuntimeError("falha simulada"), ["Segunda funciona."]])
+        conversa.definir_cliente(api)
+        with self._ws() as ws:
+            self._perguntar(ws, "primeira pergunta", t=1)
+            self._perguntar(ws, "segunda pergunta", t=2)
+            vistos, fins_da_via = [], 0
+            while fins_da_via < 2:
+                ev = ws.receive_json()
+                vistos.append(ev)
+                fins_da_via += ev.get("type") == "done" and bool(ev.get("conversa"))
+        frases = [e["text"] for e in vistos if e["type"] == "frase"]
+        self.assertEqual(frases, [rapido.FRASE_ESCALADA, "Segunda funciona."])
+        self.assertEqual(len(self.simba.recebidos), 1, "so a primeira foi ao agente")
+
+    def test_lock_liberado_quando_a_primeira_escala_pelo_haiku(self):
+        api = ClienteFalso([_Fluxo(["Deixe-me ver."], ferramenta="escalar_para_agente"), ["Segunda funciona."]])
+        conversa.definir_cliente(api)
+        with self._ws() as ws:
+            self._perguntar(ws, "primeira pergunta", t=1)
+            self._perguntar(ws, "segunda pergunta", t=2)
+            vistos, fins_da_via = [], 0
+            while fins_da_via < 2:
+                ev = ws.receive_json()
+                vistos.append(ev)
+                fins_da_via += ev.get("type") == "done" and bool(ev.get("conversa"))
+        self.assertEqual([e["text"] for e in vistos if e["type"] == "frase"], ["Deixe-me ver.", "Segunda funciona."])
+
+    def test_escalada_nao_segura_a_fila_enquanto_o_agente_trabalha(self):
+        self._agente(SimbaLento(0.6))
+        api = ClienteFalso([_Fluxo([], ferramenta="escalar_para_agente"), ["Resposta rapida."]])
+        conversa.definir_cliente(api)
+        with self._ws() as ws:
+            self._perguntar(ws, "primeira pergunta", t=1)
+            self._perguntar(ws, "segunda pergunta", t=2)
+            vistos = []
+            while not any(_fim_do_agente(e) for e in vistos):
+                vistos.append(ws.receive_json())
+        textos = [e.get("text") for e in vistos if e["type"] == "frase"]
+        self.assertIn("Resposta rapida.", textos, "a segunda foi respondida antes de o agente terminar a primeira")
+
+    def _agente(self, simba):
+        server.state["simba"] = simba
+
+    def test_lock_liberado_se_o_envio_falha_no_meio(self):
+        class SocketMorto:
+            async def send_json(self, ev):
+                raise RuntimeError("socket fechado")
+
+        fila = server.FilaRapida()
+        conversa.definir_cliente(ClienteFalso([["Oi."], RuntimeError("x"), _Fluxo([], ferramenta="escalar_para_agente")]))
+        for _ in range(3):
+            asyncio.run(server.via_rapida(SocketMorto(), "celular", "boa tarde", fila))
+            self.assertFalse(fila.trava.locked())
+        self.assertEqual(self.simba.recebidos, [])
+
+    def test_lock_liberado_se_o_agente_da_erro(self):
+        class SimbaQueQuebra(SimbaFalso):
+            async def ask(self, text):
+                raise RuntimeError("falha simulada")
+                yield
+
+        self._agente(SimbaQueQuebra())
+        conversa.definir_cliente(ClienteFalso([_Fluxo([], ferramenta="escalar_para_agente"), ["Segunda funciona."]]))
+        with self._ws() as ws:
+            self._perguntar(ws, "primeira pergunta", t=1)
+            self._perguntar(ws, "segunda pergunta", t=2)
+            vistos, fins_da_via = [], 0
+            while fins_da_via < 2:
+                ev = ws.receive_json()
+                vistos.append(ev)
+                fins_da_via += ev.get("type") == "done" and bool(ev.get("conversa"))
+        self.assertIn("Segunda funciona.", [e.get("text") for e in vistos if e["type"] == "frase"])
+
+    def test_fila_fechada_nao_chama_o_haiku_nem_o_agente(self):
+        api = ClienteFalso([["Nao deveria falar."]])
+        conversa.definir_cliente(api)
+        fila = server.FilaRapida()
+        fila.aberta = False
+        asyncio.run(server.via_rapida(types.SimpleNamespace(send_json=None), "celular", "boa tarde", fila))
+        self.assertEqual(api.chamadas, [])
+        self.assertEqual(self.simba.recebidos, [])
+        self.assertFalse(fila.trava.locked())
+
+    def test_cada_conexao_tem_a_sua_fila_e_ela_some_ao_desconectar(self):
+        conversa.definir_cliente(ClienteFalso([["Oi."], ["Oi de novo."]]))
+        self.assertEqual(server.FILAS_RAPIDAS, {})
+        with self._ws() as ws1, self._ws() as ws2:
+            self._perguntar(ws1, "oi", t=1)
+            _ate(ws1, _fim_conversa)
+            self._perguntar(ws2, "oi", t=1)
+            _ate(ws2, _fim_conversa)
+            filas = list(server.FILAS_RAPIDAS.values())
+            self.assertEqual(len(filas), 2)
+            self.assertIsNot(filas[0].trava, filas[1].trava)
+        self.assertTrue(self._esperar(lambda: not server.FILAS_RAPIDAS), "a fila tem de sumir com a conexao")
+
+    def test_conexao_sem_o_recurso_nao_ganha_fila(self):
+        with self._ws(recursos="") as ws, self._ws(recursos="conversa", device="pc") as ws2:
+            ws.send_json({"type": "ping", "t": 1})
+            ws2.send_json({"type": "ping", "t": 1})
+            _ate(ws, lambda e: e.get("type") == "pong")
+            _ate(ws2, lambda e: e.get("type") == "pong")
+            self.assertEqual(server.FILAS_RAPIDAS, {})
+
+    def test_desconectar_com_mensagem_na_fila_nao_deixa_tarefa_chamando_o_haiku(self):
+        api = ClienteFalso([_Fluxo(["Primeira lenta."], demora=0.4), ["Nunca deveria falar."]])
+        conversa.definir_cliente(api)
+        with self._ws() as ws:
+            self._perguntar(ws, "primeira pergunta", t=1)
+            self._perguntar(ws, "segunda pergunta", t=2)
+            ws.send_json({"type": "ping", "t": 9})
+            _ate(ws, lambda e: e.get("type") == "pong")
+        import time
+        time.sleep(1.0)                       # a primeira termina; a segunda acorda e ve que a conexao acabou
+        self.assertEqual(len(api.chamadas), 1)
+        self.assertEqual(self.simba.recebidos, [])
+        self.assertEqual(server.FILAS_RAPIDAS, {})
+
+    def test_modo_conversa_e_agente_continuam_sem_fila(self):
+        api = ClienteFalso([["Bonjour !"], ["Oui."]])
+        conversa.definir_cliente(api)
+        with self._ws() as ws:
+            self._perguntar(ws, "quero praticar francês", t=1)
+            _ate(ws, _fim_conversa)
+            self._perguntar(ws, "bonjour", t=2)
+            eventos = _ate(ws, _fim_conversa)
+        self.assertEqual([e["text"] for e in eventos if e["type"] == "frase"], ["Oui."])
+        self.assertNotIn("tools", api.chamadas[1])
+
+    def test_nada_vai_para_o_log(self):
+        conversa.definir_cliente(ClienteFalso([_Fluxo(["Resposta sigilosa um."], demora=0.05), ["Resposta sigilosa dois."]]))
+        with self._ws() as ws:
+            self._perguntar(ws, "pergunta sigilosa um", t=1)
+            self._perguntar(ws, "pergunta sigilosa dois", t=2)
+            dones = 0
+            while dones < 2:
+                dones += ws.receive_json().get("type") == "done"
+        self.assertNotIn("sigilosa", self._log.getvalue())
 
 
 def json_texto(eventos) -> str:
